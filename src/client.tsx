@@ -1,0 +1,887 @@
+/** Official WebUI half: one native `/bridge` command card, not a second WebUI. */
+
+import { Component, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ErrorInfo, type ReactNode } from 'react'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import { JsonTree, MarkdownText, MenuItemButton } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { JsonTreeLabels, MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { ChatNodeViewProps, CommandRowProps } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+import { bridgeEntryUnavailable, createBridgeLauncher, createBridgeSessionMenuAction, hasBridgeEntryDialog, registerBridgeCommandMenu, registerBridgeShortcut, type BridgeLauncher, type BridgeSessionMenuAction } from './client-entrypoints.ts'
+import { createBridgeReviewDefinition } from './client-review-node.ts'
+
+import {
+  appendBridgeTextListItem,
+  buildBridgeMigrationCommand,
+  buildBridgePlanApprovalCommand,
+  buildBridgePreviewCommand,
+  MAX_EDITED_SUMMARY_CHARS,
+  MAX_APPROVED_PLAN_CHARS,
+  openBridgeSessionWhenVisible,
+  parseBridgeCard,
+  readBridgeToolOutcome,
+  parseBridgeTextProjection,
+  parseJsonDocument,
+  removeBridgeTextListItem,
+  replaceBridgeTextListItem,
+  replaceBridgeTextSection,
+  uiLanguageOf,
+  type BridgeCard,
+  type BridgeOutcome,
+  type BridgeTextProjection,
+  type BridgeTargetPicker,
+  type BridgeTextSection,
+  type BridgePlanApproval,
+} from './client-contract.ts'
+
+const STYLE_ID = 'dsh-plugin-bridge/native-card'
+const STYLE = `
+.dsh-bridge-entry-error{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:6px 0;padding:8px 10px;border:1px solid var(--dsw-alias-border-subtle,light-dark(#dedede,#3f3f46));border-radius:8px;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere;color:var(--dsw-alias-state-error-primary,#b3261e)}
+.dsh-bridge-entry-error>span{min-width:0;flex:1 1 160px;max-height:6em;overflow:auto;overflow-wrap:anywhere}.dsh-bridge-entry-error>.dsh-bridge-button{flex:0 0 auto}
+.dsh-bridge-plan-action{display:inline-flex;flex-direction:column;align-items:flex-end;gap:4px;min-width:0;max-width:160px}.dsh-bridge-plan-action .dsh-bridge-button{font-size:11px;line-height:1.35;padding:6px 8px;white-space:normal}.dsh-bridge-plan-action [role=alert]{font-size:11px;line-height:1.35;max-width:160px;overflow-wrap:anywhere;color:var(--dsw-alias-state-error-primary,#b3261e)}
+.dsh-bridge-card{border:1px solid var(--dsw-alias-border-subtle,light-dark(#dedede,#3f3f46));border-radius:12px;background:var(--dsw-alias-background-primary,light-dark(#fff,#18181b));color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5));overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.dsh-bridge-head{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 14px;border-bottom:1px solid var(--dsw-alias-border-subtle,light-dark(#e6e6e6,#3f3f46));background:var(--dsw-alias-background-secondary,light-dark(#fafafa,#202024))}
+.dsh-bridge-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:var(--dsw-alias-state-business-secondary,light-dark(#e8f1ff,#22325c));color:var(--dsw-alias-state-business-primary,light-dark(#2869d8,#8eaeff));font:700 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+.dsh-bridge-title{min-width:0;flex:1;font-size:13px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dsh-bridge-route{font:500 11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dsw-alias-label-secondary,light-dark(#666,#a1a1aa))}
+.dsh-bridge-body{padding:14px}.dsh-bridge-copy{font-size:13px;line-height:1.55;color:var(--dsw-alias-label-secondary,light-dark(#5f6368,#b4b4bd))}
+.dsh-bridge-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}.dsh-bridge-tabs{display:inline-flex;flex-shrink:0;padding:2px;border-radius:8px;background:var(--dsw-alias-background-tertiary,light-dark(#f1f2f4,#29292e))}
+.dsh-bridge-button,.dsh-bridge-tab{border:0;border-radius:7px;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;transition:background-color .15s ease,color .15s ease,transform .1s ease}
+.dsh-bridge-tab{padding:7px 10px;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#666,#a1a1aa))}.dsh-bridge-tab[aria-selected=true]{background:var(--dsw-alias-background-primary,light-dark(#fff,#3a3a40));color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5));box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.dsh-bridge-button{padding:8px 11px;background:var(--dsw-alias-background-tertiary,light-dark(#f1f2f4,#303036));color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5))}.dsh-bridge-button[data-primary=true]{background:var(--dsw-alias-state-business-primary,light-dark(#2869d8,#4f7ee8));color:#fff}.dsh-bridge-button:disabled{cursor:not-allowed;opacity:.55}.dsh-bridge-button:not(:disabled):active{transform:translateY(1px)}
+.dsh-bridge-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}.dsh-bridge-panel{box-sizing:border-box;max-height:min(56vh,520px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:14px;border:1px solid var(--dsw-alias-border-subtle,light-dark(#e3e5e8,#3f3f46));border-radius:9px;background:var(--dsw-alias-background-primary,light-dark(#fff,#18181b))}
+.dsh-bridge-preview{min-width:0}.dsh-bridge-markdown-editor,.dsh-bridge-text-editor,.dsh-bridge-list-input{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-strong,light-dark(#c8ccd2,#52525b));border-radius:8px;outline:none;background:var(--dsw-alias-background-primary,light-dark(#fff,#202024));color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5))}
+.dsh-bridge-markdown-editor{min-height:360px;resize:vertical;padding:13px 14px;font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;tab-size:2}.dsh-bridge-text-editor{min-height:92px;resize:vertical;padding:10px 11px;font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.dsh-bridge-list-input{min-width:0;min-height:34px;resize:vertical;padding:9px 10px;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.dsh-bridge-markdown-editor:focus,.dsh-bridge-text-editor:focus,.dsh-bridge-list-input:focus{border-color:var(--dsw-alias-state-business-primary,#2869d8);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-business-primary,#2869d8) 18%,transparent)}
+.dsh-bridge-form{display:grid;gap:14px}.dsh-bridge-field{display:grid;gap:7px}.dsh-bridge-field-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.dsh-bridge-field-label{font-size:12px;font-weight:700;color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5))}.dsh-bridge-field-help{font-size:11px;color:var(--dsw-alias-label-tertiary,light-dark(#85898f,#a1a1aa))}
+.dsh-bridge-list{display:grid;gap:7px}.dsh-bridge-list-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;align-items:center}.dsh-bridge-list-button{align-self:center;padding:8px 9px}.dsh-bridge-add-button{justify-self:start}.dsh-bridge-appendix{display:grid;gap:7px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-subtle,light-dark(#e3e5e8,#3f3f46))}.dsh-bridge-appendix-copy{font-size:11px;color:var(--dsw-alias-label-tertiary,light-dark(#85898f,#a1a1aa))}
+.dsh-bridge-notice{padding:12px;border-radius:8px;background:var(--dsw-alias-background-secondary,light-dark(#f7f8fa,#29292e));font-size:12px;line-height:1.55;color:var(--dsw-alias-label-secondary,light-dark(#5f6368,#b4b4bd))}.dsh-bridge-notice-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.dsh-bridge-draft-notice{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding:9px 10px;border-radius:8px;background:var(--dsw-alias-state-warn-secondary,light-dark(#fff5d8,#443814));color:var(--dsw-alias-state-warn-primary,light-dark(#785a00,#f3d36b));font-size:12px}.dsh-bridge-draft-notice .dsh-bridge-actions{margin-left:0}
+.dsh-bridge-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;color:var(--dsw-alias-label-tertiary,light-dark(#85898f,#a1a1aa));font-size:11px}.dsh-bridge-chip{padding:4px 7px;border-radius:999px;background:var(--dsw-alias-background-tertiary,light-dark(#f2f3f5,#29292e))}
+.dsh-bridge-warning,.dsh-bridge-error{margin-top:10px;padding:9px 10px;border-radius:8px;font-size:12px;line-height:1.45}.dsh-bridge-warning{background:var(--dsw-alias-state-warn-secondary,light-dark(#fff5d8,#443814));color:var(--dsw-alias-state-warn-primary,light-dark(#785a00,#f3d36b))}.dsh-bridge-error{background:var(--dsw-alias-state-error-secondary,light-dark(#ffe9e7,#4a2325));color:var(--dsw-alias-state-error-primary,light-dark(#b3261e,#ffaaa4));white-space:pre-wrap}
+.dsh-bridge-progress{height:3px;margin-top:12px;border-radius:999px;overflow:hidden;background:var(--dsw-alias-background-tertiary,light-dark(#eceef1,#303036))}.dsh-bridge-progress::after{content:"";display:block;width:42%;height:100%;border-radius:inherit;background:var(--dsw-alias-state-business-primary,light-dark(#2869d8,#6d92ff));animation:dsh-bridge-scan 1.35s ease-in-out infinite}
+.dsh-bridge-success{display:grid;gap:10px}.dsh-bridge-session{padding:10px;border-radius:8px;background:var(--dsw-alias-state-success-secondary,light-dark(#e8f7ed,#183a26));font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.dsh-bridge-status{min-height:18px;font-size:11px;color:var(--dsw-alias-label-tertiary,light-dark(#85898f,#a1a1aa))}
+.dsh-bridge-message{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5))}
+.dsh-bridge-help{margin-top:14px}.dsh-bridge-help>summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary,light-dark(#666,#a1a1aa))}.dsh-bridge-help>.dsh-bridge-panel{margin-top:8px}.dsh-bridge-help>summary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2869d8);outline-offset:3px}
+.dsh-bridge-picker{display:grid;gap:8px;margin-top:12px}.dsh-bridge-choices{display:flex;gap:8px;flex-wrap:wrap}.dsh-bridge-after{display:inline-flex;align-items:center;gap:6px}
+.dsh-bridge-choice{position:relative;cursor:pointer}.dsh-bridge-choice input{position:absolute;opacity:0;width:1px;height:1px;margin:0}.dsh-bridge-choice span{display:block;padding:7px 10px;border-radius:7px;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--dsw-alias-label-secondary,light-dark(#666,#a1a1aa))}
+.dsh-bridge-choice input:checked+span{background:var(--dsw-alias-background-primary,light-dark(#fff,#3a3a40));color:var(--dsw-alias-label-primary,light-dark(#171717,#f4f4f5));box-shadow:0 1px 2px rgba(0,0,0,.18)}.dsh-bridge-choice input:disabled+span{cursor:not-allowed;opacity:.55}.dsh-bridge-choice input:focus-visible+span{outline:2px solid var(--dsw-alias-state-business-primary,#2869d8);outline-offset:2px}
+.dsh-bridge-button:focus-visible,.dsh-bridge-tab:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2869d8);outline-offset:2px}@keyframes dsh-bridge-scan{0%{transform:translateX(-110%)}100%{transform:translateX(340%)}}
+@media(max-width:900px){.dsh-bridge-preview-card{margin-bottom:clamp(96px,18vh,150px)}}
+@media(max-width:640px){.dsh-bridge-head{align-items:flex-start;flex-wrap:wrap;padding-block:10px}.dsh-bridge-route{width:100%;padding-left:32px}.dsh-bridge-toolbar{align-items:stretch;flex-direction:column}.dsh-bridge-tabs{align-self:flex-start;max-width:100%;overflow-x:auto}.dsh-bridge-panel{max-height:52vh;padding:11px}.dsh-bridge-actions{width:100%;margin-left:0}.dsh-bridge-toolbar>.dsh-bridge-actions .dsh-bridge-button{flex:1}.dsh-bridge-draft-notice{align-items:flex-start;flex-direction:column}.dsh-bridge-list-row{grid-template-columns:minmax(0,1fr)}}
+@media(prefers-reduced-motion:reduce){.dsh-bridge-progress::after{animation:none;width:65%}.dsh-bridge-button,.dsh-bridge-tab{transition:none}}
+`
+
+interface BridgeInjected {
+  readonly execute: (sessionId: SessionId, line: string) => Promise<BridgeOutcome>
+  readonly openSession: (sessionId: SessionId, lang: 'zh' | 'en') => Promise<void>
+}
+
+interface CommandRemote {
+  execute(sessionId: SessionId, line: string, images: readonly unknown[]): Promise<{
+    ok: boolean
+    value?: { result: BridgeOutcome }
+    error?: { code: string; message: string }
+  }>
+}
+
+type BridgeCommandCardProps = CommandRowProps & BridgeInjected
+
+const COPY = {
+  zh: {
+    title: '会话迁移', preparing: '正在生成可编辑的交接摘要', safe: '原会话不会被修改',
+    preview: '预览', text: '文本编辑', markdownSource: 'Markdown', copy: '复制摘要', copied: '已复制', confirm: '确认迁移',
+    confirming: '正在创建目标会话…', open: '打开目标会话', opening: '正在打开目标会话…',
+    json: 'JSON 结构', markdownPreview: 'Markdown 预览', markdownEditor: '交接摘要 Markdown 编辑器', chars: '字符',
+    listHelp: '每行一项，无需输入 Markdown 符号', addItem: '添加一项', removeItem: '删除此项',
+    appendix: '附录（只读）', appendixHelp: '视觉证据与未解析图片会原样保留；需要修改请切换到 Markdown。',
+    textUnavailable: '这份摘要不是可无损转换的标准五段格式。内容没有被修改，请使用 Markdown 编辑。',
+    editMarkdown: '使用 Markdown', newPreview: '检测到新的预览；当前编辑稿不会被自动覆盖。',
+    keepDraft: '保留编辑稿', loadPreview: '加载新预览', renderFailure: 'Bridge 卡片渲染失败；其他插件和会话不受影响。',
+    tooLong: `摘要超过 WebUI 的 ${MAX_EDITED_SUMMARY_CHARS.toLocaleString()} 字符安全上限，请使用摘要文件回退。`,
+    fileFallback: '摘要文件', stalePreview: '这张旧预览没有安全确认标识。请重新运行 /bridge 生成预览，或使用摘要文件流程。',
+    afterMigration: '迁移后', waitMode: '等待我确认', continueMode: '直接继续',
+    waitHelp: '新会话复述交接后停下，等你确认。', continueHelp: '新会话复述交接后，在同一轮接着做下一步。',
+    pickTarget: '选择目标模式', pickRunning: '正在生成预览，结果会出现在下方的新卡片里。', pickDone: '预览已生成，见下方的新卡片。',
+    pickHelp: '接下来会生成可编辑的交接摘要。确认前不会创建目标会话，原会话保持不动。', commandHelp: '命令行用法（可选）',
+  },
+  en: {
+    title: 'Session handoff', preparing: 'Generating an editable handoff preview', safe: 'The source session stays untouched',
+    preview: 'Preview', text: 'Text', markdownSource: 'Markdown', copy: 'Copy summary', copied: 'Copied', confirm: 'Confirm migration',
+    confirming: 'Creating the target session…', open: 'Open target session', opening: 'Opening target session…',
+    json: 'JSON structure', markdownPreview: 'Markdown preview', markdownEditor: 'Handoff summary Markdown editor', chars: 'chars',
+    listHelp: 'One item per line; no Markdown markers needed', addItem: 'Add item', removeItem: 'Remove item',
+    appendix: 'Appendix (read only)', appendixHelp: 'Visual evidence and unresolved images stay exact; use Markdown to edit them.',
+    textUnavailable: 'This handoff is not a losslessly editable five-section document. Nothing changed; use Markdown instead.',
+    editMarkdown: 'Use Markdown', newPreview: 'A newer preview arrived. Your draft was not overwritten.',
+    keepDraft: 'Keep draft', loadPreview: 'Load new preview', renderFailure: 'The Bridge card failed to render. Other plugins and sessions are unaffected.',
+    tooLong: `The handoff exceeds the ${MAX_EDITED_SUMMARY_CHARS.toLocaleString()}-character WebUI safety limit. Use the summary-file fallback.`,
+    fileFallback: 'Summary file', stalePreview: 'This older preview has no secure confirmation ID. Run /bridge again or use the summary-file workflow.',
+    afterMigration: 'After migration', waitMode: 'Wait for my confirmation', continueMode: 'Continue directly',
+    waitHelp: 'The new session restates the handoff, then waits for your confirmation.',
+    continueHelp: 'The new session restates the handoff and continues with the next step in the same request.',
+    pickTarget: 'Choose a target mode', pickRunning: 'Generating the preview; it appears in a new card below.', pickDone: 'The preview is ready in the new card below.',
+    pickHelp: 'Next, review an editable handoff summary. No target is created before you confirm; the source stays untouched.', commandHelp: 'Command-line help (optional)',
+  },
+} as const
+
+const PRIMITIVE_LABELS = {
+  zh: {
+    markdown: {
+      code: { copyLabel: '复制', copiedLabel: '已复制' },
+      footnotes: '脚注',
+    },
+    json: {
+      copyValue: '复制值', copyJson: '复制 JSON', copyPath: '复制属性路径',
+      copyPrettyJson: '复制格式化 JSON', copyCompactJson: '复制紧凑 JSON',
+      copied: '已复制', copyFailed: '复制失败',
+      collapseNode: '折叠 JSON 节点', expandNode: '展开 JSON 节点',
+      copyButtonTitle: (action: string) => `${action}；右键查看更多复制选项`,
+    },
+  },
+  en: {
+    markdown: {
+      code: { copyLabel: 'Copy', copiedLabel: 'Copied' },
+      footnotes: 'Footnotes',
+    },
+    json: {
+      copyValue: 'Copy value', copyJson: 'Copy JSON', copyPath: 'Copy property path',
+      copyPrettyJson: 'Copy pretty JSON', copyCompactJson: 'Copy compact JSON',
+      copied: 'Copied', copyFailed: 'Copy failed',
+      collapseNode: 'Collapse JSON node', expandNode: 'Expand JSON node',
+      copyButtonTitle: (action: string) => `${action}; right-click for copy options`,
+    },
+  },
+} satisfies Record<'zh' | 'en', { markdown: MarkdownLabels; json: JsonTreeLabels }>
+
+/** 礼貌播报区先空着挂上，文案在挂载后写入，这样第一次变化也会被读屏读到。 */
+export function PoliteStatus({ text }: { text: string }) {
+  const [announced, setAnnounced] = useState('')
+  useEffect(() => { setAnnounced(text) }, [text])
+  return <div className={announced ? 'dsh-bridge-status' : undefined} aria-live="polite" aria-atomic="true">{announced}</div>
+}
+
+function Header({ lang, route }: { lang: 'zh' | 'en'; route?: string }) {
+  return <div className="dsh-bridge-head">
+    <span className="dsh-bridge-mark" aria-hidden>B</span>
+    <span className="dsh-bridge-title">{COPY[lang].title}</span>
+    {route ? <span className="dsh-bridge-route">{route}</span> : null}
+  </div>
+}
+
+function RunningCard() {
+  const lang = uiLanguageOf(typeof document === 'undefined' ? undefined : document.documentElement.lang)
+  const copy = COPY[lang]
+  const [seconds, setSeconds] = useState(0)
+  // 挂载时先空着。有些读屏只播报变化，区域一出现就带着整句时，第一次会漏掉。
+  const [announcement, setAnnouncement] = useState('')
+  useEffect(() => {
+    setAnnouncement(copy.preparing)
+  }, [copy.preparing])
+  useEffect(() => {
+    const started = Date.now()
+    const timer = window.setInterval(() => { setSeconds(Math.floor((Date.now() - started) / 1000)) }, 1000)
+    return () => { window.clearInterval(timer) }
+  }, [])
+  return <div className="dsh-bridge-card">
+    <Header lang={lang} />
+    <div className="dsh-bridge-body">
+      <div className="dsh-bridge-copy">
+        <span aria-live="polite" aria-atomic="true">{announcement}</span>
+        <span aria-hidden="true">{` · ${seconds}s`}</span>
+      </div>
+      <div className="dsh-bridge-status">{copy.safe}</div>
+      <div className="dsh-bridge-progress" aria-hidden="true" />
+    </div>
+  </div>
+}
+
+function SummaryView({ summary, lang }: { summary: string; lang: 'zh' | 'en' }) {
+  const json = useMemo(() => parseJsonDocument(summary), [summary])
+  return <div className="dsh-bridge-preview" aria-label={json === undefined ? COPY[lang].markdownPreview : COPY[lang].json}>
+    {json === undefined
+      ? <MarkdownText text={summary} labels={PRIMITIVE_LABELS[lang].markdown} />
+      : <JsonTree data={json} label={COPY[lang].json} labels={PRIMITIVE_LABELS[lang].json} />}
+  </div>
+}
+
+function TextListEditor({ lang, onAppend, onChange, onRemove, section }: {
+  lang: 'zh' | 'en'
+  onAppend: (value: string) => boolean
+  onChange: (index: number, value: string) => void
+  onRemove: (index: number) => void
+  section: BridgeTextSection
+}) {
+  const copy = COPY[lang]
+  const items = section.items ?? []
+  const [draftRows, setDraftRows] = useState<string[]>([])
+  const [itemDrafts, setItemDrafts] = useState<Record<number, string>>({})
+  const removeDraft = (index: number) => { setDraftRows((current) => current.filter((_, itemIndex) => itemIndex !== index)) }
+  return <div className="dsh-bridge-list">
+    {items.map((item, index) => <div className="dsh-bridge-list-row" key={`${section.key}-${item.itemStart}`}>
+      <textarea
+        aria-label={`${section.label} ${index + 1}`}
+        className="dsh-bridge-list-input"
+        maxLength={MAX_EDITED_SUMMARY_CHARS}
+        rows={Math.min(4, item.text.split(/\r\n|\n|\r/gu).length)}
+        value={itemDrafts[index] ?? item.text}
+        onChange={(event) => {
+          const value = event.currentTarget.value
+          setItemDrafts((current) => ({ ...current, [index]: value }))
+          if (value) onChange(index, value)
+        }}
+        onBlur={() => {
+          if (itemDrafts[index] === '') onRemove(index)
+          setItemDrafts((current) => {
+            const next = { ...current }
+            delete next[index]
+            return next
+          })
+        }}
+        spellCheck
+      />
+      <button
+        aria-label={`${copy.removeItem}: ${section.label} ${index + 1}`}
+        className="dsh-bridge-button dsh-bridge-list-button"
+        type="button"
+        onPointerDown={(event) => { event.preventDefault() }}
+        onClick={() => {
+          onRemove(index)
+        }}
+      >−</button>
+    </div>)}
+    {draftRows.map((item, index) => <div className="dsh-bridge-list-row" key={`${section.key}-draft-${index}`}>
+      <textarea
+        aria-label={`${section.label} ${items.length + index + 1}`}
+        autoFocus={index === draftRows.length - 1}
+        className="dsh-bridge-list-input"
+        maxLength={MAX_EDITED_SUMMARY_CHARS}
+        rows={1}
+        value={item}
+        onChange={(event) => {
+          const value = event.currentTarget.value
+          setDraftRows((current) => current.map((row, rowIndex) => rowIndex === index ? value : row))
+        }}
+        onBlur={() => {
+          if (!item.trim() || onAppend(item)) removeDraft(index)
+        }}
+        spellCheck
+      />
+      <button
+        aria-label={`${copy.removeItem}: ${section.label} ${items.length + index + 1}`}
+        className="dsh-bridge-button dsh-bridge-list-button"
+        type="button"
+        onPointerDown={(event) => { event.preventDefault() }}
+        onClick={() => { removeDraft(index) }}
+      >−</button>
+    </div>)}
+    <button
+      className="dsh-bridge-button dsh-bridge-add-button"
+      type="button"
+      onClick={() => { setDraftRows((current) => [...current, '']) }}
+      aria-label={`${copy.addItem}: ${section.label}`}
+    >＋ {copy.addItem}</button>
+  </div>
+}
+
+function TextHandoffEditor({ idPrefix, lang, onChange, onError, projection }: {
+  idPrefix: string
+  lang: 'zh' | 'en'
+  onChange: (summary: string) => boolean
+  onError: (message: string) => void
+  projection: BridgeTextProjection
+}) {
+  const copy = COPY[lang]
+  const safelyApply = (operation: () => string): boolean => {
+    try {
+      onError('')
+      return onChange(operation())
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    }
+  }
+  const updateSection = (section: BridgeTextSection, value: string) => {
+    safelyApply(() => replaceBridgeTextSection(projection, section.key, value))
+  }
+  return <div className="dsh-bridge-form">
+    {projection.sections.map((section) => <div
+      aria-labelledby={section.kind === 'list' ? `${idPrefix}-${section.key}-label` : undefined}
+      className="dsh-bridge-field"
+      key={section.key}
+      role={section.kind === 'list' ? 'group' : undefined}
+    >
+      <div className="dsh-bridge-field-head">
+        {section.kind === 'text'
+          ? <label className="dsh-bridge-field-label" htmlFor={`${idPrefix}-${section.key}`}>{section.label}</label>
+          : <div className="dsh-bridge-field-label" id={`${idPrefix}-${section.key}-label`}>{section.label}</div>}
+        {section.kind === 'list' ? <span className="dsh-bridge-field-help">{copy.listHelp}</span> : null}
+      </div>
+      {section.kind === 'text'
+        ? <textarea
+            className="dsh-bridge-text-editor"
+            id={`${idPrefix}-${section.key}`}
+            maxLength={MAX_EDITED_SUMMARY_CHARS}
+            value={section.text}
+            onChange={(event) => { updateSection(section, event.currentTarget.value) }}
+            spellCheck
+          />
+        : <TextListEditor
+            lang={lang}
+            section={section}
+            onAppend={(value) => safelyApply(() => appendBridgeTextListItem(projection, section.key, value))}
+            onChange={(index, value) => { safelyApply(() => replaceBridgeTextListItem(projection, section.key, index, value)) }}
+            onRemove={(index) => { safelyApply(() => removeBridgeTextListItem(projection, section.key, index)) }}
+          />}
+    </div>)}
+    {projection.opaqueSuffix
+      ? <div className="dsh-bridge-appendix">
+          <div><div className="dsh-bridge-field-label">{copy.appendix}</div><div className="dsh-bridge-appendix-copy">{copy.appendixHelp}</div></div>
+          <SummaryView summary={projection.opaqueSuffix} lang={lang} />
+        </div>
+      : null}
+  </div>
+}
+
+type EditorMode = 'preview' | 'text' | 'markdown'
+const EDITOR_MODES: readonly EditorMode[] = ['preview', 'text', 'markdown']
+
+function PreviewCard({ card, execute, openSession, sessionId }: {
+  card: Extract<BridgeCard, { phase: 'preview' }>
+  execute: BridgeInjected['execute']
+  openSession: BridgeInjected['openSession']
+  sessionId: SessionId
+}) {
+  const copy = COPY[card.lang]
+  const panelId = useId()
+  const [mode, setMode] = useState<EditorMode>('preview')
+  const [summary, setSummary] = useState(card.summary)
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState('')
+  const [error, setError] = useState('')
+  const [pendingSummary, setPendingSummary] = useState<string | null>(null)
+  const [autoContinue, setAutoContinue] = useState(false)
+  const [created, setCreated] = useState<Extract<BridgeCard, { phase: 'migrated' }> | null>(null)
+  const lastCardSummary = useRef(card.summary)
+  const confirming = useRef(false)
+  const tooLong = summary.length > MAX_EDITED_SUMMARY_CHARS
+  const textProjection = useMemo(() => tooLong ? undefined : parseBridgeTextProjection(summary), [summary, tooLong])
+  const updateSummary = (next: string) => {
+    if (next.length > MAX_EDITED_SUMMARY_CHARS) {
+      setError(copy.tooLong)
+      return false
+    }
+    setError('')
+    setSummary(next)
+    return true
+  }
+
+  useEffect(() => {
+    const prior = lastCardSummary.current
+    if (card.summary === prior) return
+    lastCardSummary.current = card.summary
+    if (summary === prior) {
+      setSummary(card.summary)
+      setPendingSummary(null)
+    } else {
+      setPendingSummary(card.summary)
+    }
+  }, [card.summary, summary])
+
+  const copySummary = async () => {
+    try {
+      await navigator.clipboard.writeText(summary)
+      setError('')
+      setStatus(copy.copied)
+    } catch (cause) {
+      setStatus('')
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const confirm = async () => {
+    if (confirming.current) return
+    confirming.current = true
+    setBusy(true)
+    setError('')
+    setStatus(copy.confirming)
+    try {
+      const outcome = await execute(sessionId, buildBridgeMigrationCommand(card.targetPreset, summary, card.lang, card.previewId ?? '', { autoContinue }))
+      const result = parseBridgeCard(outcome)
+      if (result.phase === 'error') throw new Error(result.text)
+      if (result.phase !== 'migrated') throw new Error(card.lang === 'en' ? 'The host returned no target session.' : '宿主没有返回目标会话。')
+      setCreated(result)
+      setStatus(copy.opening)
+      await openSession(result.sessionId, card.lang)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      setStatus('')
+    } finally {
+      confirming.current = false
+      setBusy(false)
+    }
+  }
+
+  if (created) return <MigratedCard card={created} openSession={openSession} status={status} error={error} />
+
+  return <div className="dsh-bridge-card dsh-bridge-preview-card">
+    <Header lang={card.lang} route={`${card.sourcePreset} → ${card.targetPreset}`} />
+    <div className="dsh-bridge-body">
+      <div className="dsh-bridge-toolbar">
+        <div
+          className="dsh-bridge-tabs"
+          role="tablist"
+          aria-label={copy.title}
+          onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const current = EDITOR_MODES.indexOf(mode)
+            const next = event.key === 'Home'
+              ? 0
+              : event.key === 'End'
+                ? EDITOR_MODES.length - 1
+                : (current + (event.key === 'ArrowRight' ? 1 : -1) + EDITOR_MODES.length) % EDITOR_MODES.length
+            const nextMode = EDITOR_MODES[next] ?? 'preview'
+            setMode(nextMode)
+            window.requestAnimationFrame(() => { document.getElementById(`${panelId}-${nextMode}`)?.focus() })
+          }}
+        >
+          {([
+            ['preview', copy.preview],
+            ['text', copy.text],
+            ['markdown', copy.markdownSource],
+          ] as const).map(([value, label]) => <button
+            aria-controls={panelId}
+            aria-selected={mode === value}
+            className="dsh-bridge-tab"
+            id={`${panelId}-${value}`}
+            key={value}
+            role="tab"
+            tabIndex={mode === value ? 0 : -1}
+            type="button"
+            onClick={() => { setMode(value) }}
+          >{label}</button>)}
+        </div>
+        <div className="dsh-bridge-actions">
+          <button className="dsh-bridge-button" type="button" onClick={() => { void copySummary() }}>{copy.copy}</button>
+          <div className="dsh-bridge-after">
+            <span className="dsh-bridge-field-help">{copy.afterMigration}</span>
+            <div className="dsh-bridge-tabs" role="radiogroup" aria-label={copy.afterMigration}>
+              {([[false, copy.waitMode, copy.waitHelp], [true, copy.continueMode, copy.continueHelp]] as const).map(([value, label, help]) => <label className="dsh-bridge-choice" key={label} title={help}>
+                <input type="radio" name={`${panelId}-after`} checked={autoContinue === value} disabled={busy} onChange={() => { setAutoContinue(value) }} />
+                <span>{label}</span>
+              </label>)}
+            </div>
+          </div>
+          <button className="dsh-bridge-button" data-primary type="button" disabled={busy || !card.previewId || summary.trim() === '' || tooLong} onClick={() => { void confirm() }}>{busy ? copy.confirming : copy.confirm}</button>
+        </div>
+      </div>
+      {pendingSummary !== null
+        ? <div className="dsh-bridge-draft-notice" role="status">
+            <span>{copy.newPreview}</span>
+            <div className="dsh-bridge-actions">
+              <button className="dsh-bridge-button" type="button" onClick={() => { setPendingSummary(null) }}>{copy.keepDraft}</button>
+              <button className="dsh-bridge-button" type="button" onClick={() => { setSummary(pendingSummary); setPendingSummary(null) }}>{copy.loadPreview}</button>
+            </div>
+          </div>
+        : null}
+      <div aria-labelledby={`${panelId}-${mode}`} className="dsh-bridge-panel" id={panelId} role="tabpanel">
+        {tooLong
+          ? <div className="dsh-bridge-notice" role="alert">{copy.tooLong}{card.summaryFile ? <><br /><strong>{copy.fileFallback}:</strong> <code>{card.summaryFile}</code></> : null}</div>
+          : mode === 'preview'
+          ? <SummaryView summary={summary} lang={card.lang} />
+          : mode === 'text'
+            ? textProjection
+              ? <TextHandoffEditor
+                  idPrefix={panelId}
+                  lang={card.lang}
+                  projection={textProjection}
+                  onChange={updateSummary}
+                  onError={setError}
+                />
+              : <div className="dsh-bridge-notice" role="status">
+                  {copy.textUnavailable}
+                  <div className="dsh-bridge-notice-actions"><button className="dsh-bridge-button" type="button" onClick={() => { setMode('markdown') }}>{copy.editMarkdown}</button></div>
+                </div>
+            : <textarea className="dsh-bridge-markdown-editor" aria-label={copy.markdownEditor} maxLength={MAX_EDITED_SUMMARY_CHARS} value={summary} onChange={(event) => { updateSummary(event.currentTarget.value) }} spellCheck={false} />}
+      </div>
+      <div className="dsh-bridge-meta">
+        {card.stats ? <span className="dsh-bridge-chip">{card.stats}</span> : null}
+        <span className="dsh-bridge-chip">{summary.length.toLocaleString()} {copy.chars}</span>
+      </div>
+      {card.warnings.map((warning) => <div className="dsh-bridge-warning" key={warning}>⚠ {warning}</div>)}
+      {!card.previewId ? <div className="dsh-bridge-warning">⚠ {copy.stalePreview}</div> : null}
+      <PoliteStatus text={status} />
+      {error ? <div className="dsh-bridge-error" role="alert">{error}</div> : null}
+    </div>
+  </div>
+}
+
+function MigratedCard({ card, error = '', openSession, status = '' }: {
+  card: Extract<BridgeCard, { phase: 'migrated' }>
+  error?: string
+  openSession: BridgeInjected['openSession']
+  status?: string
+}) {
+  const copy = COPY[card.lang]
+  const [opening, setOpening] = useState(false)
+  const [localError, setLocalError] = useState(error)
+  const open = async () => {
+    setOpening(true)
+    setLocalError('')
+    try { await openSession(card.sessionId, card.lang) } catch (cause) { setLocalError(cause instanceof Error ? cause.message : String(cause)) } finally { setOpening(false) }
+  }
+  return <div className="dsh-bridge-card">
+    <Header lang={card.lang} route={`→ ${card.targetPreset}`} />
+    <div className="dsh-bridge-body dsh-bridge-success">
+      <div className="dsh-bridge-session"><strong>{card.title}</strong><br />{card.sessionId}</div>
+      {card.details.map((detail) => <div className="dsh-bridge-copy" key={detail}>{detail}</div>)}
+      <div className="dsh-bridge-actions"><button className="dsh-bridge-button" data-primary type="button" disabled={opening} onClick={() => { void open() }}>{opening ? copy.opening : copy.open}</button></div>
+      <PoliteStatus text={status} />
+      {card.warnings.map((warning) => <div className="dsh-bridge-warning" key={warning}>⚠ {warning}</div>)}
+      {localError ? <div className="dsh-bridge-error" role="alert">{localError}</div> : null}
+    </div>
+  </div>
+}
+
+function TargetPicker({ execute, picker, sessionId }: {
+  execute: BridgeInjected['execute']
+  picker: BridgeTargetPicker
+  sessionId: SessionId
+}) {
+  const copy = COPY[picker.lang]
+  const [running, setRunning] = useState(false)
+  const [status, setStatus] = useState('')
+  const [error, setError] = useState('')
+  const pick = async (target: string) => {
+    if (running) return
+    setRunning(true)
+    setError('')
+    setStatus(copy.pickRunning)
+    try {
+      // The host renders the preview as its own command card; this card only reports the hand-off.
+      await execute(sessionId, buildBridgePreviewCommand(target, picker.lang))
+      setStatus(copy.pickDone)
+    } catch (cause) {
+      setStatus('')
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setRunning(false)
+    }
+  }
+  return <div className="dsh-bridge-picker">
+    <div className="dsh-bridge-field-label">{copy.pickTarget}</div>
+    <div className="dsh-bridge-choices">
+      {picker.targets.map((target) => <button className="dsh-bridge-button" disabled={running} key={target} type="button" onClick={() => { void pick(target) }}>{target}</button>)}
+    </div>
+    <PoliteStatus text={status} />
+    {error ? <div className="dsh-bridge-error" role="alert">{error}</div> : null}
+  </div>
+}
+
+function MessageCard({ card, execute, sessionId }: {
+  card: Extract<BridgeCard, { phase: 'message' | 'error' }>
+  execute: BridgeInjected['execute']
+  sessionId: SessionId
+}) {
+  const lang = card.phase === 'message' ? card.lang : (/[㐀-鿿]/u.test(card.text) ? 'zh' : 'en')
+  const copy = COPY[lang]
+  const pickerHelp = card.phase === 'message' && card.picker !== undefined
+  return <div className="dsh-bridge-card"><Header lang={lang} /><div className="dsh-bridge-body">
+    {pickerHelp ? <div className="dsh-bridge-copy">{copy.pickHelp}</div>
+      : <div className="dsh-bridge-panel">{card.phase === 'error' ? <div className="dsh-bridge-error" role="alert">{card.text}</div> : <pre className="dsh-bridge-message">{card.text}</pre>}</div>}
+    {card.picker ? <TargetPicker execute={execute} picker={card.picker} sessionId={sessionId} /> : null}
+    {pickerHelp ? <details className="dsh-bridge-help"><summary>{copy.commandHelp}</summary>
+      <div className="dsh-bridge-panel"><pre className="dsh-bridge-message">{card.text}</pre></div>
+    </details> : null}
+  </div></div>
+}
+
+interface BridgePlanActionInjected {
+  approvePlan: (plan: BridgePlanApproval, lang: 'zh' | 'en') => Promise<BridgeOutcome>
+  openPlanTarget: BridgeInjected['openSession']
+}
+
+/** An additive action in the host's public plan-review slot. Native Approve and Discuss remain owned by the host. */
+function BridgePlanReviewAction({review,approvePlan,openPlanTarget}: {
+  review: {plan:string;callId?:string}
+} & BridgePlanActionInjected) {
+  const lang = uiLanguageOf(document.documentElement.lang)
+  const [busy,setBusy] = useState(false)
+  const [error,setError] = useState<string>()
+  const inFlight = useRef(false)
+  const mounted = useRef(true)
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false}},[])
+  if (!review.callId) return null
+  const tooLong = review.plan.length > MAX_APPROVED_PLAN_CHARS
+  const approve = async (): Promise<void> => {
+    if (inFlight.current || tooLong || !review.callId) return
+    inFlight.current=true
+    setBusy(true)
+    setError(undefined)
+    try {
+      const outcome=await approvePlan({callId:review.callId,plan:review.plan},lang)
+      const result=parseBridgeCard(outcome)
+      if (result.phase !== 'migrated') throw new Error(outcome?.text || (lang==='zh'?'计划交接失败。':'Plan handoff failed.'))
+      // Source cancellation can unmount this action; navigation must still finish.
+      await openPlanTarget(result.sessionId,lang)
+    } catch(cause) {
+      if(mounted.current) setError(cause instanceof Error?cause.message:String(cause))
+    } finally {
+      if(mounted.current){inFlight.current=false;setBusy(false)}
+    }
+  }
+  return <span className="dsh-bridge-plan-action" data-bridge-plan-approval>
+    <button type="button" className="dsh-bridge-button" disabled={busy||tooLong}
+      aria-label={lang==='zh'?'批准计划并在新会话执行':'Approve plan and execute in a new session'}
+      title={tooLong
+        ? (lang==='zh'?'计划全文过长，请缩短后重新呈交。':'The complete plan is too long; present a shorter plan.')
+        : (lang==='zh'?'将完整批准计划交给新会话执行，原会话保留在计划模式。':'Execute the complete approved plan in a fresh session; keep the source in plan mode.')}
+      onClick={()=>{void approve()}}>
+      {busy?(lang==='zh'?'正在交接…':'Handing off…'):(lang==='zh'?'批准并在新会话执行':'Approve in new session')}
+    </button>
+    {error?<span role="alert">{error}</span>:null}
+  </span>
+}
+
+class BridgeCardBoundary extends Component<{ children: ReactNode; lang: 'zh' | 'en' }, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error('dsh-plugin-bridge card render failed', error, info.componentStack)
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children
+    return <div className="dsh-bridge-card"><Header lang={this.props.lang} /><div className="dsh-bridge-body">
+      <div className="dsh-bridge-error" role="alert">{COPY[this.props.lang].renderFailure}</div>
+    </div></div>
+  }
+}
+
+function BridgeCommandCardContent({ node, execute, openSession, sessionId }: BridgeCommandCardProps) {
+  const card = useMemo(() => parseBridgeCard(node.outcome), [node.outcome])
+  if (card.phase === 'running') return <RunningCard />
+  if (card.phase === 'preview') return <PreviewCard card={card} execute={execute} openSession={openSession} sessionId={sessionId} />
+  if (card.phase === 'migrated') return <MigratedCard card={card} openSession={openSession} />
+  return <MessageCard card={card} execute={execute} sessionId={sessionId} />
+}
+
+/** No resident chrome: only a failed menu/shortcut launch contributes an inline retry. */
+export function BridgeEntryNotice({ launcher, sessionId, language }: {
+  launcher: BridgeLauncher
+  sessionId: SessionId
+  language?: 'zh' | 'en'
+}) {
+  const lang = language ?? uiLanguageOf(typeof document === 'undefined' ? undefined : document.documentElement.lang)
+  const snapshot = useSyncExternalStore(launcher.subscribe, () => launcher.snapshotFor(sessionId), () => launcher.snapshotFor(sessionId))
+  if (!snapshot.error) return null
+  return <div className="dsh-bridge-entry-error" role="alert">
+    <span>{snapshot.error}</span>
+    <button className="dsh-bridge-button" type="button" disabled={snapshot.busy} onClick={() => { void launcher.launch(sessionId) }}>
+      {lang === 'zh' ? '重试打开迁移' : 'Retry handoff picker'}
+    </button>
+  </div>
+}
+
+type BridgeToolCardProps = ToolCallViewProps & BridgeInjected
+
+interface BridgeSessionMenuInjected {
+  readonly launcher: BridgeLauncher
+  readonly menu: BridgeSessionMenuAction
+  readonly subscribe: (listener: () => void) => () => void
+}
+
+/** The public row menu stays useful when the Host's + menu filters argument-taking commands. */
+export function BridgeSessionMenuItem({ launcher, menu, subscribe, sessionId, useMenuOpenState, language }: PropsRuntime<'sidebar.workspaces.session.menu.item'> & BridgeSessionMenuInjected & { language?: 'zh' | 'en' }) {
+  const [, setMenuOpen] = useMenuOpenState()
+  const visible = useSyncExternalStore(subscribe, () => menu.available(sessionId), () => false)
+  const snapshot = useSyncExternalStore(launcher.subscribe, () => launcher.snapshotFor(sessionId), () => launcher.snapshotFor(sessionId))
+  const lang = language ?? uiLanguageOf(typeof document === 'undefined' ? undefined : document.documentElement.lang)
+  if (!visible || !MenuItemButton) return null
+  return <MenuItemButton disabled={snapshot.busy} onSelect={() => { menu.select(sessionId, () => { setMenuOpen(false) }) }}>
+    {lang === 'zh' ? '迁移会话' : 'Hand off session'}
+  </MenuItemButton>
+}
+
+/** Natural-language invocation only prepares; the same trusted preview still needs a human click. */
+export function BridgeToolCard(props: BridgeToolCardProps) {
+  const lang = uiLanguageOf(typeof document === 'undefined' ? undefined : document.documentElement.lang)
+  let outcome: BridgeOutcome
+  if (props.phase !== 'result') outcome = null
+  else {
+    const presented = props.toolName === 'bridge_prepare' ? readBridgeToolOutcome(props.block.meta) : undefined
+    outcome = presented && (!props.block.isError || presented.kind === 'error') ? presented : {
+      kind: 'error', text: lang === 'zh'
+        ? '无法读取这次交接预览。请重新运行 /bridge，核对摘要后再确认迁移。'
+        : 'This handoff preview is unavailable. Run /bridge again, review the summary, then confirm migration.',
+    }
+    // bridge_prepare never migrates. A malformed result cannot become a target-opening action.
+    if (parseBridgeCard(outcome).phase === 'migrated') outcome = { kind: 'error', text: lang === 'zh'
+      ? '交接工具没有返回待确认的预览。请运行 /bridge。'
+      : 'The handoff tool returned no preview to confirm. Run /bridge.' }
+  }
+  const key = `${props.callId}:${props.phase}:${outcome?.kind ?? 'running'}:${outcome?.text ?? ''}`
+  return <BridgeCardBoundary key={key} lang={lang}>
+    <BridgeCommandCardContent {...props} node={{ outcome } as CommandRowProps['node']} />
+  </BridgeCardBoundary>
+}
+
+/** Same pending review, projected outside collapsed Tool/process rows. */
+export function BridgeReviewNode(props: ChatNodeViewProps<'dsh-bridge-review'> & BridgeInjected) {
+  const lang = uiLanguageOf(typeof document === 'undefined' ? undefined : document.documentElement.lang)
+  const outcome = props.node.data.outcome
+  return <BridgeCardBoundary key={`${props.node.key}:${outcome.kind}:${outcome.text ?? ''}`} lang={lang}>
+    <BridgeCommandCardContent {...props} node={{ outcome } as CommandRowProps['node']} />
+  </BridgeCardBoundary>
+}
+
+/** Rich renderer for the durable command lifecycle keyed by name and isolated from every other plugin. */
+export function BridgeCommandCard(props: BridgeCommandCardProps) {
+  const lang = uiLanguageOf(typeof document === 'undefined' ? undefined : document.documentElement.lang)
+  const outcomeKey = props.node.outcome === null ? 'running' : `${props.node.outcome.kind}:${props.node.outcome.text ?? ''}`
+  return <BridgeCardBoundary key={outcomeKey} lang={lang}><BridgeCommandCardContent {...props} /></BridgeCardBoundary>
+}
+
+/** Client services are supplied by the official WebUI module table. */
+// rc.2 guards the parent `remote` face separately from its `remote.commands`
+// capability; older compatible builds tolerate the redundant parent seat.
+// Navigation (`uiWorkspace`) is deliberately absent: Cordis inject entries are
+// all required, so hosts without that service would leave this module pending.
+export const inject = ['slots', 'sessions', 'remote', 'remote.commands']
+
+export function apply(ctx: ClientContext): void {
+  const commands = (ctx as unknown as { remote: { commands: CommandRemote } }).remote.commands
+  const navigation = new AbortController()
+  ctx.effect(() => () => { navigation.abort() }, 'bridge: target session navigation')
+  const execute: BridgeInjected['execute'] = async (sessionId, line) => {
+    const result = await commands.execute(sessionId, line, [])
+    if (!result.ok) throw new Error(`${result.error?.code ?? 'command-failed'}: ${result.error?.message ?? 'The host rejected the command.'}`)
+    if (result.value === undefined) throw new Error('The /bridge command was not admitted by the host.')
+    return result.value.result
+  }
+  const openSession: BridgeInjected['openSession'] = async (sessionId, lang) => {
+    await openBridgeSessionWhenVisible(ctx, sessionId, { lang, signal: navigation.signal })
+  }
+  const launcher = createBridgeLauncher({ execute: async (sessionId, line) => {
+    const binding = ctx.sessions.binding?.(sessionId as SessionId)
+    const message = bridgeEntryUnavailable(binding?.session.getSnapshot(), uiLanguageOf(document.documentElement.lang))
+    if (message) {
+      // Hero hides command cards and composer.dock. The public per-Session
+      // input notice is visible there, without changing drafts or sending RPCs.
+      try { binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', message) } catch { /* custom clients retain the local error fallback */ }
+      throw new Error(message)
+    }
+    return execute(sessionId as SessionId, line)
+  } })
+  ctx.effect(() => () => launcher.dispose(), 'bridge: entry point lifetime')
+  ctx.inject(['uiSession', 'layout'], scope => {
+    const menu = createBridgeSessionMenuAction({
+      currentSession: () => scope.uiSession.adapter.current.getSnapshot().key as SessionId | undefined,
+      conversationVisible: () => scope.layout.panelInfo.getSnapshot().activePanelId === null,
+      blocked: () => hasBridgeEntryDialog(typeof document === 'undefined' ? undefined : document),
+      launch: sessionId => { void launcher.launch(sessionId) },
+    })
+    scope.effect(() => () => menu.dispose(), 'bridge: session menu action lifetime')
+    const subscribe = (listener: () => void) => {
+      const offSession = scope.uiSession.adapter.current.subscribe?.(listener)
+      const offPanel = scope.layout.panelInfo.subscribe?.(listener)
+      return () => { offSession?.(); offPanel?.() }
+    }
+    scope.slots.inject('sidebar.workspaces.session.menu.item', () => scope.slots.register({
+      name: 'sidebar.workspaces.session.menu.item', id: 'dsh-plugin-bridge/handoff', order: 350,
+      inject: (): BridgeSessionMenuInjected => ({ launcher, menu, subscribe }),
+    }, BridgeSessionMenuItem))
+  })
+  // The composer's + button uses this Host command directory. A decoration
+  // enhances its existing row instead of adding duplicate chrome or a command.
+  ctx.inject(['commandUi', 'uiSession', 'layout'], scope => {
+    scope.effect(() => {
+      try {
+        return registerBridgeCommandMenu(scope.commandUi, {
+          currentSession: () => scope.uiSession.adapter.current.getSnapshot().key as SessionId | undefined,
+          conversationVisible: () => scope.layout.panelInfo.getSnapshot().activePanelId === null,
+          blocked: () => hasBridgeEntryDialog(typeof document === 'undefined' ? undefined : document),
+          launch: sessionId => { void launcher.launch(sessionId) },
+        })
+      } catch { return () => {} }
+    }, 'bridge: native command menu entry')
+  })
+  // Missing optional services disable only this child; the original command/card stays usable.
+  ctx.inject(['shortcuts', 'uiSession', 'layout'], scope => {
+    scope.effect(() => {
+      try {
+        return registerBridgeShortcut(scope.shortcuts, {
+          chinese: () => uiLanguageOf(document.documentElement.lang) === 'zh',
+          currentSession: () => scope.uiSession.adapter.current.getSnapshot().key as SessionId | undefined,
+          conversationVisible: () => scope.layout.panelInfo.getSnapshot().activePanelId === null,
+          launch: sessionId => { void launcher.launch(sessionId) },
+        })
+      } catch { return () => {} }
+    }, 'bridge: configurable keyboard entry')
+  })
+  ctx.effect(() => {
+    const prior = document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`)
+    if (prior !== null) return () => {}
+    const style = document.createElement('style')
+    style.dataset.plugin = 'dsh-plugin-bridge'
+    style.dataset.pluginCss = STYLE_ID
+    style.textContent = STYLE
+    document.head.append(style)
+    return () => { style.remove() }
+  }, 'bridge: native card styles')
+  ctx.slots.inject('conversation.chat.commandview', () => ctx.slots.register({
+    name: 'conversation.chat.commandview',
+    key: 'bridge',
+    inject: (): BridgeInjected => ({
+      execute,
+      openSession,
+    }),
+  }, BridgeCommandCard))
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+    name: 'conversation.composer.dock', id: 'dsh-plugin-bridge/entry-error', order: 30,
+    inject: () => ({ launcher }),
+  }, BridgeEntryNotice))
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview', key: 'bridge_prepare', inject: () => ({ execute, openSession }),
+  }, BridgeToolCard))
+  ctx.inject(['uiConversation'], scope => {
+    // Older clients can expose the service before this public registry existed.
+    // Only this projection is optional; commands and native Tool cards stay usable.
+    if (typeof scope.uiConversation.events?.register === 'function') {
+      scope.uiConversation.events.register(createBridgeReviewDefinition())
+    }
+  })
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: 'dsh-bridge-review', inject: () => ({ execute, openSession }),
+  }, BridgeReviewNode))
+  // Older hosts can lack this seat. Slot injection waits for its owner and does
+  // not add another required client service or replace any other plugin entry.
+  const planSlots=ctx.slots as unknown as {
+    inject(name:string,setup:()=>unknown):unknown
+    register(options:{name:string;id:string;inject:(sessionId:SessionId)=>BridgePlanActionInjected},component:typeof BridgePlanReviewAction):unknown
+  }
+  planSlots.inject('conversation.plan-review.actions',()=>planSlots.register({
+    name:'conversation.plan-review.actions',id:'dsh-plugin-bridge/approved-plan',
+    inject:sessionId=>({
+      approvePlan:async(plan,lang)=>{
+        const response=await commands.execute(sessionId,buildBridgePlanApprovalCommand(plan,lang),[])
+        if(!response.ok)throw new Error(`${response.error?.code??'command-failed'}: ${response.error?.message??'Plan handoff rejected.'}`)
+        if(response.value===undefined)throw new Error('The Bridge plan approval command was not admitted.')
+        return response.value.result
+      },
+      openPlanTarget:async(sessionId,lang)=>{
+        await openBridgeSessionWhenVisible(ctx,sessionId,{lang,signal:navigation.signal})
+      },
+    }),
+  },BridgePlanReviewAction))
+}

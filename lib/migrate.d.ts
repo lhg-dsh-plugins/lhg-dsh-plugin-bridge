@@ -1,0 +1,197 @@
+import { type BridgeSource } from './compression.ts';
+import { type BridgeHost, type BridgeHostInput, type ModelSelection, type PresetRow, type SessionRow } from './host.ts';
+import type { ChatMessage } from './types.ts';
+export type { ModelSelection, PresetRow, SessionRow } from './host.ts';
+export type ModelTier = 'flash' | 'current' | 'pro';
+export type InjectMode = 'goal' | 'prompt' | 'both';
+export type Lang = 'zh' | 'en' | 'auto';
+export interface ModelRoute {
+    provider: string;
+    model: string;
+    /** 为什么选中它：configured / follow-session / tier:<tier> / fallback-current。 */
+    reason: string;
+}
+/**
+ * 列出全部会话。
+ *
+ * `session.list` 的 v1 一次返回全部，`cursor` 是预留位；这里仍按 cursor 取完，
+ * 免得上游哪天真的分页之后这里悄悄只看第一页。
+ */
+export declare function listSessions(input: BridgeHostInput): Promise<SessionRow[]>;
+export declare function findSession(host: BridgeHostInput, sessionId: string): Promise<SessionRow | undefined>;
+/** 找出会话所属工作区；找不到就返回 undefined（调用方退回用 cwd 建会话）。 */
+export declare function findWorkspaceId(input: BridgeHostInput, sessionId: string): Promise<string | undefined>;
+/** 可作为迁移目标的 preset（去掉 broken 的）。 */
+export declare function listPresets(input: BridgeHostInput): Promise<PresetRow[]>;
+/** Map the one upstream internal rename without making either generation mandatory. */
+export declare function resolvePresetTarget(requested: string, presets: readonly PresetRow[]): string;
+/**
+ * 选压缩工人的模型。
+ *
+ * 不写死任何 provider/model：先读源会话的模型目录，再按档位在**同一 provider**
+ * 里挑。挑不到就退回源会话当前模型——档位是省钱偏好，不该成为换 provider 的人
+ * 装不上的理由。
+ */
+export declare function resolveWorkerModel(input: BridgeHostInput, sessionId: string, tier: ModelTier, override?: {
+    provider?: string;
+    model?: string;
+}): Promise<ModelRoute>;
+/** 压缩工人用哪个 preset：优先 minimal，其次 standard，再否则 host 默认。 */
+export declare function resolveWorkerPreset(input: BridgeHostInput): Promise<string | undefined>;
+export interface WaitOptions {
+    /** Owner cancellation, separate from the polling deadline. */
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    /** 等待新一轮执行事件的宽限期；超过仍未出现就按未启动处理。 */
+    startGraceMs?: number;
+    pollMs?: number;
+    /** 只观察这个事件序号之后的新一轮；worker 新建后通常为 0。 */
+    afterSeq?: number;
+}
+/**
+ * Why a watched turn ended, read from its `turn/end` event (upstream `TurnEndReason`).
+ * `waitIdle` omits it when the event carries no reason, as with some test fakes.
+ */
+export interface TurnEndSummary {
+    /** `completed` / `aborted` / `blocked` / `error` / `max-tokens` / `interrupted`. */
+    kind: string;
+    /** `error` only: the host's provider-neutral failure code, e.g. `MISSING_CREDENTIAL`. */
+    code?: string;
+    /** `error` only: the host's human-readable failure. */
+    message?: string;
+    /** `aborted` only: who cancelled the turn (`user` / `parent` / `hook` / `disposed` / `legacy`). */
+    cause?: string;
+}
+export interface WaitResult {
+    idle: boolean;
+    started: boolean;
+    /** Present when the observed `turn/end` carried a reason. */
+    end?: TurnEndSummary;
+}
+/**
+ * 等一个会话的新一轮写入 `turn/end`。
+ *
+ * `session.list` 是全局列表，拿它每两秒轮询一个 worker 会把会话总量放大成
+ * O(会话数 × 轮询次数)。`session.history` 则只读目标会话；用 prompt 前的事件
+ * 水位隔开旧轮次后，`turn/start` / `turn/end` 也比易过期的 running 快照更可靠。
+ * 结束原因（例如没配 API key 时的 `MISSING_CREDENTIAL`）随结果一起返回。
+ */
+export declare function waitIdle(input: BridgeHostInput, sessionId: string, options?: WaitOptions): Promise<WaitResult>;
+/** 拉取并折叠会话历史（按需翻页）。 */
+export declare function foldedHistory(input: BridgeHostInput, sessionId: string, options?: {
+    pageMessages?: number;
+    maxPages?: number;
+}): Promise<ChatMessage[]>;
+/** 会话里最后一条非空 assistant 文本。 */
+export declare function lastAssistantText(host: BridgeHostInput, sessionId: string): Promise<string>;
+/** `RpcError.code` values `previewMigration` uses when the worker leaves no usable handoff. */
+export type WorkerFailureCode = 'worker-failed' | 'worker-aborted' | 'worker-timeout' | 'worker-not-started' | 'worker-empty';
+/** Host facts carried in `RpcError.details` for a worker failure, so callers can localize it. */
+export interface WorkerFailureDetails {
+    turnEnd?: TurnEndSummary;
+    /** Preserve a primary provider failure while making failed cleanup visible. */
+    cleanupFailure?: {
+        code: string;
+        message: string;
+    };
+    /** The wait bound that expired, for `worker-timeout` and `worker-not-started`. */
+    waitedMs?: number;
+}
+export interface PreviewOptions {
+    signal?: AbortSignal;
+    /** Fresh bounded port: cleanup must not inherit the aborted invocation port. */
+    cleanupHostFor?: (signal: AbortSignal) => BridgeHost;
+    /** Cleanup read/poll budget, clamped to at most five seconds. */
+    cleanupTimeoutMs?: number;
+    /** Shared only with Bridge's preview tool to reject recursive worker calls. */
+    workerSessionIds?: Set<string>;
+    sessionId: string;
+    /** 同一命令读到的源会话快照；动态工作目录在创建前仍会重新读取。 */
+    sourceSession?: SessionRow;
+    tier?: ModelTier;
+    provider?: string;
+    model?: string;
+    sourceCharBudget?: number;
+    summaryCharBudget?: number;
+    lang?: Lang;
+    workerTimeoutMs?: number;
+    /** 轮询空闲的间隔，测试里调小。 */
+    pollMs?: number;
+    /** 只取材、不真的调模型（自检用）。 */
+    dryRun?: boolean;
+    onProgress?: (message: string) => void;
+}
+export interface PreviewResult {
+    summary: string;
+    source: BridgeSource;
+    lang: 'zh' | 'en';
+    worker: {
+        sessionId?: string;
+        provider: string;
+        model: string;
+        reason: string;
+        preset?: string;
+    };
+    /** 工人会话是否被限速取消（摘要按已产出文本计）。 */
+    capped: boolean;
+    sourceSession: SessionRow | undefined;
+}
+/** 生成交接摘要：取材 → 起临时工人 → 收摘要 → 归档工人。 */
+export declare function previewMigration(input: BridgeHostInput, options: PreviewOptions): Promise<PreviewResult>;
+export interface MigrateOptions {
+    /** An approved plan is transferred verbatim and starts implementation, even in the same preset. */
+    executionKind?: 'approved-plan';
+    /** Quoted user context supplements a plan without rewriting its approved body. */
+    sourceContext?: string;
+    sessionId: string;
+    /** 同一流程的源会话快照；不能作为动态工作目录的最终落点依据。 */
+    sourceSession?: SessionRow;
+    to: string;
+    summary: string;
+    lang?: 'zh' | 'en';
+    /**
+     * goal 的自主轮次上限。
+     *
+     * 上游 `goal.create` 的部署默认是 **256**，而 `dsh-goal-round-driver` 会在
+     * agent 空闲时把目标渲染成 `<goal_round>` 提示反复跑。也就是说不显式设这个值，
+     * 一次「迁移」就等于给新会话开了最多 256 轮的自主循环。交接只需要一轮。
+     */
+    goalRounds?: number;
+    /** 摘要注入方式，默认 both（挂 goal + 首轮提示里也带全文）。 */
+    inject?: InjectMode;
+    /** 是否发首轮交接指令。 */
+    kickoff?: boolean;
+    /** 是否在同一轮复述后继续工作。goal 始终先暂停，避免 round driver 另起一轮。 */
+    autoContinue?: boolean;
+    /** 给新会话起个能看出来源的标题。 */
+    title?: string;
+    onProgress?: (message: string) => void;
+}
+export interface MigrateResult {
+    sessionId: string;
+    agentPreset: string;
+    /** 是否在 kickoff 前把源会话的模型选择复制到了目标会话。 */
+    modelTransferred: boolean;
+    /** 迁移时读到的源会话模型；读取失败时省略并给出 warning。 */
+    sourceModel?: ModelSelection;
+    goalCreated: boolean;
+    goalPaused: boolean;
+    kickoffSent: boolean;
+    titled: boolean;
+    /** 自动策略实际把多少张尚未解析的原图注入了 kickoff。 */
+    imagesSent: number;
+    warnings: string[];
+}
+/**
+ * 建目标会话并交接。
+ *
+ * 注入方式说明：`goal.create` 本身**不会**把目标注入模型上下文（上游
+ * `dsh-goal` README：「Goal mutations do not inject model context」），
+ * 摘要能被模型看见依赖 goal-round-driver 把它渲染成 `<goal_round>` 提示，
+ * 或模型主动调 `get_goal`。所以默认把摘要同时放进首轮提示：任何组装下都成立。
+ */
+export declare function executeMigration(input: BridgeHostInput, options: MigrateOptions): Promise<MigrateResult>;
+/** 默认标题：让新会话在侧栏里一眼看得出来源。 */
+export declare function migratedTitle(sourceTitle: string | undefined, to: string): string;
+/** 从 session.list 行里尽力取出标题（projection 形状随部署而异）。 */
+export declare function titleOf(row: SessionRow | undefined): string | undefined;

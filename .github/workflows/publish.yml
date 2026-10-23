@@ -1,0 +1,38 @@
+name: publish
+run-name: Publish dsh-plugin-bridge ${{ github.event.release.tag_name }}
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # Trusted publishing requires npm >=11.5.1. Pin the CLI instead of
+      # depending on whichever npm happens to ship with the runner's Node 24.
+      - run: npm install --global npm@11.19.0
+      - run: npm ci
+      - run: npm run release:check -- "${{ github.event.release.tag_name }}"
+      - name: Publish to npm when this version is missing
+        shell: bash
+        run: |
+          package_spec="$(node -p "const p=require('./package.json'); p.name + '@' + p.version")"
+          if npm view "$package_spec" version >/dev/null 2>&1; then
+            echo "$package_spec is already on npm; bootstrap release needs no second publish."
+          else
+            npm publish --access public --provenance
+          fi

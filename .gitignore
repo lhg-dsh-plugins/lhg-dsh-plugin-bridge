@@ -1,0 +1,5 @@
+node_modules/
+reports/eval-*.jsonl
+reports/eval-*.raw.json
+.DS_Store
+*.log

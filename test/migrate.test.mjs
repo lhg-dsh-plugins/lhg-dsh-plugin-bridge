@@ -1,0 +1,609 @@
+/**
+ * 迁移编排的端到端测试（对着假 host，不烧任何 token）。
+ *
+ * 0.1 的问题是：被验证的是纯函数与评测脚本，而用户拿到的是一份 SKILL.md，
+ * 中间那段「谁去调这些 RPC、按什么顺序、出错怎么办」既没有代码也没有测试。
+ * 这组测试锁住的正是那一段。
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createFakeHost } from './fake-host.mjs';
+import { createApiProxyRpc } from '../src/api-rpc.ts';
+import { createBridgeHostFromRpc } from '../src/host.ts';
+import { RpcError } from '../src/rpc.ts';
+import {
+  executeMigration,
+  findWorkspaceId,
+  listPresets,
+  migratedTitle,
+  previewMigration,
+  resolveWorkerModel,
+  resolveWorkerPreset,
+  waitIdle,
+} from '../src/migrate.ts';
+
+const fast = { pollMs: 1, workerTimeoutMs: 3_000 };
+
+/** Semantic dynamic-directory host; projections are deliberately absent here. */
+function currentDirectoryHost(fake, currentCwd = '/work/shop/.worktrees/current') {
+  const base = createBridgeHostFromRpc(fake.rpc);
+  const state = { currentCwd, unavailable: false, missing: false, absent: false };
+  const host = { ...base, sessions: { ...base.sessions, list: async (request) => {
+    if (state.unavailable) throw new Error('fresh source lookup failed');
+    const result = await base.sessions.list(request);
+    return { ...result, items: result.items.flatMap(row => {
+      if (row.sessionId !== fake.sourceSessionId) return [row];
+      if (state.missing) return [];
+      return [{ ...row, ...(state.absent ? {} : { currentCwd: state.currentCwd }) }];
+    }) };
+  } } };
+  return { host, state };
+}
+
+const targetOptions = fake => ({ sessionId: fake.sourceSessionId, to: 'code', summary: '## 目标\nX', lang: 'zh' });
+const createsOf = fake => fake.state.calls.filter(call => call.method === 'session.create');
+
+test('preview：取材 → 起工人 → 收摘要 → 归档工人', async () => {
+  const host = createFakeHost();
+  const result = await previewMigration(host.rpc, { sessionId: host.sourceSessionId, tier: 'pro', ...fast });
+
+  assert.match(result.summary, /## 目标/);
+  assert.equal(result.lang, 'zh', '取材是中文，摘要语言应自动跟随');
+  assert.equal(result.source.userMessagesTotal, 2);
+  assert.equal(result.source.truncated, false);
+  assert.ok(result.source.text.includes('7101'));
+  assert.ok(result.source.text.includes('str_replace_editor src/shop/orders.ts'), '工具痕迹应只留名字与路径');
+  assert.ok(!result.source.text.includes('一大段 stdout'), 'stdout 不该进取材');
+
+  const worker = host.state.sessions.get(result.worker.sessionId);
+  assert.equal(worker.agentPreset, 'minimal', '工人应当用最省的 preset');
+  assert.ok(host.state.archived.includes(result.worker.sessionId), '工人用完必须归档');
+  assert.equal(host.state.selected[0].model, 'deepseek-v4-pro', 'pro 档位应选中 pro 模型');
+});
+
+test('preview：压缩指令与取材一起发给工人', async () => {
+  const host = createFakeHost();
+  const result = await previewMigration(host.rpc, { sessionId: host.sourceSessionId, ...fast });
+  const workerPrompt = host.state.calls.find(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.worker.sessionId,
+  );
+  const text = workerPrompt.payload.content[0].text;
+  assert.ok(text.includes('## 关键决策与约定'), '固定五段 schema 必须在指令里');
+  assert.ok(text.includes('7101'), '取材必须跟在指令后面');
+});
+
+test('preview：工人漏掉源会话的禁用工具要求时，交接稿仍显式保留', async () => {
+  const host = createFakeHost({ workerReply: '## 目标\n心算\n\n## 当前状态\n等待继续\n\n## 关键决策与约定\n- 用户确认后计算\n\n## 关键文件\n无\n\n## 下一步\n计算' });
+  host.state.sessions.get(host.sourceSessionId).events.push({ event: {
+    type: 'user/message', seq: 100, time: 1_700_000_100_000,
+    data: { content: [{ type: 'text', text: '不要调用任何工具，不要读写文件，只心算 137 加 248。' }] },
+  } });
+  const result = await previewMigration(host.rpc, { sessionId: host.sourceSessionId, ...fast });
+  assert.match(result.summary, /不要调用任何工具/);
+  assert.match(result.summary, /不要读写文件/);
+  assert.match(result.summary, /## 关键决策与约定\n- 不要调用任何工具/);
+});
+
+test('preview：已有识图回答作为逐字视觉证据追加到摘要', async () => {
+  const exact = 'OCR 原文：ERR_IMG_55837；右侧按钮为 Retry。';
+  const host = createFakeHost({ sourceImage: { userText: '请看截图', assistantText: exact } });
+  const result = await previewMigration(host.rpc, { sessionId: host.sourceSessionId, ...fast });
+  assert.ok(result.summary.includes(exact));
+  assert.match(result.summary, /视觉证据——原文搬运/);
+  assert.equal(result.source.visualEvidence.represented, 1);
+});
+
+test('preview：工人出错也不留下垃圾会话', async () => {
+  const host = createFakeHost({ workerReply: '' });
+  await assert.rejects(
+    () => previewMigration(host.rpc, { sessionId: host.sourceSessionId, ...fast }),
+    /worker-empty.*本轮结束原因：completed/,
+  );
+  assert.equal(host.state.archived.length, 1, '失败路径也要归档工人');
+});
+
+const NO_KEY = {
+  kind: 'error',
+  error: {
+    code: 'MISSING_CREDENTIAL',
+    message: 'llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service',
+  },
+};
+
+/** 断言 previewMigration 以指定的工人失败码拒绝，并把错误交给调用方继续检查。 */
+async function rejectsWorker(host, code, options = {}) {
+  let caught;
+  await assert.rejects(
+    () => previewMigration(host.rpc, { sessionId: host.sourceSessionId, ...fast, ...options }),
+    (error) => {
+      caught = error;
+      return error instanceof RpcError && error.method === 'bridge.preview' && error.code === code;
+    },
+  );
+  assert.equal(host.state.archived.length, 1, '失败路径也要归档工人');
+  return caught;
+}
+
+test('preview：没配 API key 时带出宿主的失败码与原话', async () => {
+  const host = createFakeHost({ workerReply: '', workerTurnEnd: NO_KEY });
+  const error = await rejectsWorker(host, 'worker-failed');
+  assert.equal(error.details.turnEnd.code, 'MISSING_CREDENTIAL');
+  assert.match(error.message, /MISSING_CREDENTIAL/);
+  assert.match(error.message, /no API key for provider route/);
+});
+
+test('preview：模型出错时不把残缺的流式文本当成摘要', async () => {
+  const host = createFakeHost({
+    workerReply: '## 目标\n写到一半',
+    workerTurnEnd: { kind: 'error', error: { code: 'RATE_LIMIT', message: '429 Too Many Requests' } },
+  });
+  const error = await rejectsWorker(host, 'worker-failed');
+  assert.match(error.message, /RATE_LIMIT.*429/);
+});
+
+test('preview：工人这一轮被取消时说明取消方', async () => {
+  const host = createFakeHost({ workerReply: '', workerTurnEnd: { kind: 'aborted', reason: { kind: 'user' } } });
+  const error = await rejectsWorker(host, 'worker-aborted');
+  assert.equal(error.details.turnEnd.cause, 'user');
+});
+
+test('preview：工人一直没开始运行时报 worker-not-started 并取消它', async () => {
+  const host = createFakeHost({ startAfterPolls: 10_000 });
+  const error = await rejectsWorker(host, 'worker-not-started');
+  assert.equal(error.details.waitedMs, fast.pollMs * 6);
+  const worker = host.state.archived[0];
+  assert.ok(
+    host.state.calls.some((call) => call.method === 'session.cancel' && call.payload.sessionId === worker),
+    '放弃等待的工人必须被取消，免得归档后继续烧 token',
+  );
+});
+
+test('preview：超时且没有任何文本时报 worker-timeout', async () => {
+  const host = createFakeHost({ replyAfterPolls: 100_000 });
+  const error = await rejectsWorker(host, 'worker-timeout', { workerTimeoutMs: 40 });
+  assert.equal(error.details.waitedMs, 40);
+});
+
+test('preview：宿主没写结束原因时仍按 worker-empty 处理', async () => {
+  const host = createFakeHost({ workerReply: '', workerTurnEnd: null });
+  const error = await rejectsWorker(host, 'worker-empty');
+  assert.equal(error.details.turnEnd, undefined);
+});
+
+test('preview：空会话给出可读的拒绝理由', async () => {
+  const host = createFakeHost();
+  const empty = await host.handle('session.create', { agentPreset: 'standard' });
+  await assert.rejects(
+    () => previewMigration(host.rpc, { sessionId: empty.sessionId, ...fast }),
+    /还没有可迁移的内容/,
+  );
+});
+
+test('migrate：goal 的自主轮次被限制成 1，并默认暂停等待确认', async () => {
+  const host = createFakeHost();
+  await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary: '## 目标\n继续做电商后端',
+    lang: 'zh',
+  });
+  assert.equal(host.state.goals.length, 1);
+  assert.equal(host.state.goals[0].maxGoalRounds, 1, '不显式设值就是 256 轮自主循环');
+  assert.equal(host.state.pausedGoals.length, 1, '默认不能让目标在用户看到新会话前自动续跑');
+});
+
+test('migrate：目标会话建在目标 preset 上，且落在同一工作区', async () => {
+  const host = createFakeHost();
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'code', summary: '## 目标\nX', lang: 'zh',
+  });
+  assert.equal(result.agentPreset, 'code');
+  const create = host.state.calls.filter((c) => c.method === 'session.create').at(-1);
+  assert.equal(create.payload.workspaceId, 'ws-1');
+});
+
+test('migrate: a changed current directory overrides the original workspace, never sending both', async () => {
+  const fake = createFakeHost();
+  const { host } = currentDirectoryHost(fake);
+  await executeMigration(host, targetOptions(fake));
+  assert.deepEqual(createsOf(fake).at(-1).payload, { cwd: '/work/shop/.worktrees/current', agentPreset: 'code' });
+});
+
+for (const currentCwd of [null, '/work/shop']) {
+  test(`migrate: unchanged current directory ${String(currentCwd)} preserves the original workspace`, async () => {
+    const fake = createFakeHost();
+    const { host } = currentDirectoryHost(fake, currentCwd);
+    await executeMigration(host, targetOptions(fake));
+    assert.deepEqual(createsOf(fake).at(-1).payload, { workspaceId: 'ws-1', agentPreset: 'code' });
+  });
+}
+
+test('migrate: confirmation reads the current directory again instead of trusting preview.sourceSession', async () => {
+  const fake = createFakeHost();
+  const { host, state } = currentDirectoryHost(fake, '/work/shop/.worktrees/preview');
+  const preview = await previewMigration(host, { sessionId: fake.sourceSessionId, ...fast });
+  state.currentCwd = '/work/shop/.worktrees/confirmation';
+  await executeMigration(host, { ...targetOptions(fake), sourceSession: preview.sourceSession, summary: preview.summary });
+  assert.deepEqual(createsOf(fake).at(-1).payload, { cwd: state.currentCwd, agentPreset: 'code' });
+});
+
+test('migrate: the fresh directory read happens after asynchronous model selection reads', async () => {
+  const fake = createFakeHost();
+  const adapted = currentDirectoryHost(fake, '/work/shop/.worktrees/old');
+  const stale = (await adapted.host.sessions.list()).items[0];
+  const host = { ...adapted.host, sessions: { ...adapted.host.sessions, models: async request => {
+    adapted.state.currentCwd = '/work/shop/.worktrees/switched-during-model-read';
+    return adapted.host.sessions.models(request);
+  } } };
+  await executeMigration(host, { ...targetOptions(fake), sourceSession: stale });
+  assert.deepEqual(createsOf(fake).at(-1).payload, { cwd: adapted.state.currentCwd, agentPreset: 'code' });
+});
+
+test('preview: its one-shot worker also uses the current directory without original workspace attachment', async () => {
+  const fake = createFakeHost();
+  const { host } = currentDirectoryHost(fake);
+  await previewMigration(host, { sessionId: fake.sourceSessionId, ...fast });
+  assert.deepEqual(createsOf(fake)[0].payload, { cwd: '/work/shop/.worktrees/current', agentPreset: 'minimal' });
+});
+
+test('migrate: a retry after target-create failure re-reads the switched current directory', async () => {
+  const fake = createFakeHost({ failTargetCreateOnce: 'code' });
+  const { host, state } = currentDirectoryHost(fake, '/work/shop/.worktrees/first');
+  const stale = (await host.sessions.list()).items[0];
+  await assert.rejects(executeMigration(host, { ...targetOptions(fake), sourceSession: stale }), /临时无法创建/);
+  state.currentCwd = '/work/shop/.worktrees/retry';
+  await executeMigration(host, { ...targetOptions(fake), sourceSession: stale });
+  assert.deepEqual(createsOf(fake).map(call => call.payload), [
+    { cwd: '/work/shop/.worktrees/first', agentPreset: 'code' },
+    { cwd: '/work/shop/.worktrees/retry', agentPreset: 'code' },
+  ]);
+});
+
+for (const invalid of [undefined, 42, {}, [], '', '  ', 'relative/worktree', '/work/\0invalid']) {
+  test(`migrate: invalid present current directory ${JSON.stringify(invalid)} admits no target`, async () => {
+    const fake = createFakeHost();
+    // Passing undefined to a default argument uses its default; set the semantic field explicitly.
+    const adapted = currentDirectoryHost(fake);
+    adapted.state.currentCwd = invalid;
+    await assert.rejects(executeMigration(adapted.host, targetOptions(fake)), error => (
+      error instanceof RpcError && error.code === 'invalid-current-cwd'
+    ));
+    assert.equal(createsOf(fake).length, 0);
+    assert.equal(fake.state.goals.length, 0);
+    assert.equal(fake.state.calls.some(call => call.method === 'session.prompt'), false);
+  });
+}
+
+for (const condition of ['unavailable', 'missing', 'absent']) {
+  test(`migrate: a ${condition} fresh directory read cannot fall back to cached placement`, async () => {
+    const fake = createFakeHost();
+    const { host, state } = currentDirectoryHost(fake);
+    const stale = (await host.sessions.list()).items[0];
+    state[condition] = true;
+    await assert.rejects(executeMigration(host, { ...targetOptions(fake), sourceSession: stale }));
+    assert.equal(createsOf(fake).length, 0);
+  });
+}
+
+test('migrate: a valid absolute current directory is forwarded byte-for-byte, not normalized', async () => {
+  const fake = createFakeHost();
+  const path = '/work/./project/../target with spaces ';
+  const { host } = currentDirectoryHost(fake, path);
+  await executeMigration(host, targetOptions(fake));
+  assert.equal(createsOf(fake).at(-1).payload.cwd, path);
+});
+
+test('preview + execute: dynamic-directory freshness adds bounded reads, never worker polling', async () => {
+  const fake = createFakeHost({ replyAfterPolls: 30 });
+  const { host } = currentDirectoryHost(fake);
+  const preview = await previewMigration(host, { sessionId: fake.sourceSessionId, ...fast });
+  await executeMigration(host, { ...targetOptions(fake), sourceSession: preview.sourceSession, summary: preview.summary });
+  assert.equal(fake.state.calls.filter(call => call.method === 'session.list').length, 3,
+    'one preview source read plus one fresh read before each worker/target create, independent of polls');
+});
+
+test('migrate：preview worker 改过 host 默认模型也不会污染目标模型', async () => {
+  const vision = {
+    provider: 'deepseek-official',
+    model: 'deepseek-v4-flash-vision-exp',
+    reasoningEffort: 'high',
+  };
+  const host = createFakeHost({
+    models: {
+      current: vision,
+      routable: true,
+      groups: [{ id: 'deepseek-official', models: [{ id: vision.model }, { id: 'deepseek-v4-pro' }] }],
+      failures: [],
+    },
+  });
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'minimal', summary: '## 目标\n继续识图', lang: 'zh',
+  });
+  assert.equal(result.modelTransferred, true);
+  assert.deepEqual(result.sourceModel, vision);
+  const targetSelection = host.state.selected.find((item) => item.sessionId === result.sessionId);
+  assert.deepEqual(
+    [targetSelection.provider, targetSelection.model, targetSelection.reasoningEffort],
+    [vision.provider, vision.model, vision.reasoningEffort],
+  );
+});
+
+test('migrate：默认注入方式让摘要一定进上下文', async () => {
+  // 上游 goal.create 本身不注入模型上下文，摘要能被看见依赖 goal-round-driver。
+  // 所以默认把摘要也放进首轮提示：任何组装下都成立。
+  const host = createFakeHost();
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'code', summary: '## 目标\n端口 7101', lang: 'zh',
+  });
+  const kickoff = host.state.calls.find(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId,
+  );
+  assert.ok(kickoff.payload.content[0].text.includes('7101'), '首轮提示必须带上摘要全文');
+  assert.ok(kickoff.payload.content[0].text.includes('复述'), '并要求新会话复述理解');
+  assert.ok(kickoff.payload.content[0].text.includes('等待用户确认'), '默认只做理解校验，不继续执行');
+});
+
+test('migrate：未解析原图在视觉目标上自动随 kickoff 搬运', async () => {
+  const host = createFakeHost({ sourceImage: {}, targetSupportsImages: true });
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary: '## 目标\n检查未解析截图\n\n## 未解析图片\n- 不得猜测',
+    lang: 'zh',
+  });
+  assert.equal(result.imagesSent, 1);
+  const kickoff = host.state.calls.find(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId,
+  );
+  assert.equal(kickoff.payload.content[0].type, 'image');
+  const note = kickoff.payload.content.find((block) => block.type === 'text')?.text ?? '';
+  assert.match(note, /不要调用任何工具|do not call any tool/u, '原图已在消息里，目标不该再用工具读图');
+  assert.doesNotMatch(note, /请直接检查原图|Inspect them directly/u);
+  assert.match(kickoff.payload.content.at(-1).text, /已作为图片附在本条消息里/);
+});
+
+test('migrate：文本目标拒绝图片时无 token 请求地降级到文本 kickoff', async () => {
+  const host = createFakeHost({ sourceImage: {}, targetSupportsImages: false });
+  const result = await executeMigration(createApiProxyRpc(host.apiProxy), {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary: '## 目标\n检查未解析截图\n\n## 未解析图片\n- 不得猜测',
+    lang: 'zh',
+  });
+  assert.equal(result.imagesSent, 0);
+  assert.match(result.warnings.join('\n'), /不能接收原图/);
+  const targetPrompts = host.state.calls.filter(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId,
+  );
+  assert.equal(targetPrompts.length, 2, '第一次图片准入失败，第二次才提交纯文本；两次都没有重复模型回答');
+  assert.equal(targetPrompts.at(-1).payload.content[0].type, 'text');
+});
+
+test('migrate：alpha.2 的 namespaced 图片错误仍降级到文本 kickoff', async () => {
+  const host = createFakeHost({ sourceImage: {}, targetSupportsImages: false });
+  const alpha2Rpc = async (method, payload) => {
+    try {
+      return await host.rpc(method, payload);
+    } catch (error) {
+      if (method === 'session.prompt' && error?.code === 'attachment-error') {
+        throw new RpcError(
+          method,
+          'session/attachment-invalid',
+          '当前模型不支持图片',
+          { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
+        );
+      }
+      throw error;
+    }
+  };
+
+  const result = await executeMigration(alpha2Rpc, {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary: '## 目标\n检查未解析截图\n\n## 未解析图片\n- 不得猜测',
+    lang: 'zh',
+  });
+
+  assert.equal(result.imagesSent, 0);
+  assert.match(result.warnings.join('\n'), /不能接收原图/);
+  const targetPrompts = host.state.calls.filter(
+    (call) => call.method === 'session.prompt' && call.payload.sessionId === result.sessionId,
+  );
+  assert.equal(targetPrompts.length, 2, 'alpha.2 的图片准入失败后必须补发一次纯文本 kickoff');
+  assert.equal(targetPrompts.at(-1).payload.content[0].type, 'text');
+});
+
+test('migrate：autoContinue 在同一轮继续，但 goal 仍暂停以免追加轮次', async () => {
+  const host = createFakeHost();
+  const summary = '## 目标\n端口 7101\n## 下一步\n等待用户明确要求继续后，核对配置；部署生产环境另需管理员审批。';
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary,
+    lang: 'zh',
+    autoContinue: true,
+  });
+  assert.equal(result.goalPaused, true);
+  assert.equal(result.kickoffSent, true);
+  assert.equal(host.state.pausedGoals.length, 1);
+  const kickoff = host.state.calls.find(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId,
+  );
+  assert.ok(kickoff.payload.content[0].text.includes('继续执行下一步'));
+  assert.equal(host.state.goals[0].objective, summary, '不删除或改写用户的旧等待条件和单独审批要求');
+  const text = kickoff.payload.content[0].text;
+  assert.ok(text.includes(summary), '首轮仍包含完整原始摘要');
+  assert.ok(text.lastIndexOf('用户本次已明确选择') > text.indexOf(summary), '本次继续确认在原始摘要之后明确表达');
+  assert.match(text, /工具权限[^。]*安全限制[^。]*单独审批/);
+  assert.equal(host.state.calls.filter((c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId).length, 1);
+});
+
+test('migrate：pause 失败时先清除 goal、再取消自动启动且不发送 kickoff', async () => {
+  const host = createFakeHost({ failPause: true });
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary: '## 目标\n端口 7101',
+    lang: 'zh',
+  });
+  assert.equal(result.goalPaused, false);
+  assert.equal(result.kickoffSent, false);
+  assert.match(result.warnings.join('\n'), /已清除目标并取消自动启动/);
+  assert.equal(host.state.clearedGoals.length, 1);
+  const clearIndex = host.state.calls.findIndex(
+    (c) => c.method === 'goal.clear' && c.payload.sessionId === result.sessionId,
+  );
+  const cancelIndex = host.state.calls.findIndex(
+    (c) => c.method === 'session.cancel' && c.payload.sessionId === result.sessionId,
+  );
+  assert.ok(clearIndex >= 0);
+  assert.ok(cancelIndex > clearIndex, '必须先清掉尚未入队的 goal，再取消已排队或运行中的 attempt');
+  assert.ok(!host.state.calls.some((c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId));
+});
+
+test('migrate：旧 host 没有可选 goal.clear 时仍 fail closed，并明确要求人工检查', async () => {
+  const host = createFakeHost({ failPause: true });
+  delete host.apiProxy.goals.clear;
+  const result = await executeMigration(createApiProxyRpc(host.apiProxy), {
+    sessionId: host.sourceSessionId,
+    to: 'code',
+    summary: '## 目标\n端口 7101',
+    lang: 'zh',
+  });
+  assert.equal(result.goalPaused, false);
+  assert.equal(result.kickoffSent, false);
+  assert.match(result.warnings.join('\n'), /无法确认目标已清除/);
+  assert.match(result.warnings.join('\n'), /apiProxy 上没有 goals\.clear/);
+  assert.ok(host.state.calls.some((c) => c.method === 'session.cancel' && c.payload.sessionId === result.sessionId));
+  assert.ok(!host.state.calls.some((c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId));
+});
+
+test('migrate：没挂 goal 服务时降级而不是失败', async () => {
+  const host = createFakeHost({ failGoal: true });
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'code', summary: '## 目标\n端口 7101', lang: 'zh',
+  });
+  assert.equal(result.goalCreated, false);
+  assert.equal(result.warnings.length, 1);
+  const kickoff = host.state.calls.find(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId,
+  );
+  assert.ok(kickoff.payload.content[0].text.includes('7101'), '降级后摘要仍须进上下文');
+});
+
+test('migrate：--inject goal 仍把摘要放进 kickoff，不能让首轮失忆', async () => {
+  const host = createFakeHost();
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'code', summary: '## 目标\n端口 7101', lang: 'zh', inject: 'goal',
+  });
+  const kickoff = host.state.calls.find(
+    (c) => c.method === 'session.prompt' && c.payload.sessionId === result.sessionId,
+  );
+  assert.ok(kickoff.payload.content[0].text.includes('7101'));
+});
+
+test('migrate：空摘要被拒绝', async () => {
+  const host = createFakeHost();
+  await assert.rejects(
+    () => executeMigration(host.rpc, { sessionId: host.sourceSessionId, to: 'code', summary: '   ' }),
+    /摘要为空/,
+  );
+});
+
+test('migrate：只用 trim 判空，不改写用户编辑稿的首尾字节', async () => {
+  const host = createFakeHost();
+  const summary = ' \r\n## 目标\r\n保留结尾的两个空格。  \r\n ';
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'code', summary, lang: 'zh',
+  });
+  assert.equal(host.state.goals[0].objective, summary);
+  const kickoff = host.state.calls.find(
+    (call) => call.method === 'session.prompt' && call.payload.sessionId === result.sessionId,
+  );
+  assert.ok(kickoff.payload.content[0].text.includes(summary), 'kickoff 也必须携带同一份未裁剪编辑稿');
+});
+
+test('migrate：新会话标题能看出来源', async () => {
+  const host = createFakeHost();
+  await host.handle('session.rename', { sessionId: host.sourceSessionId, title: '电商后端' });
+  const result = await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId, to: 'code', summary: '## 目标\nX', lang: 'zh', title: migratedTitle('电商后端', 'code'),
+  });
+  assert.equal(result.titled, true);
+  assert.equal(host.state.renames.at(-1).title, '电商后端 → code');
+});
+
+test('waitIdle：会话排队慢也不会被误判成已跑完', async () => {
+  // 0.1 的实现先 sleep 2s 再看 running；host 慢一点就会取到上一轮的回答。
+  const host = createFakeHost({ startAfterPolls: 3, replyAfterPolls: 2 });
+  const created = await host.handle('session.create', { agentPreset: 'standard' });
+  await host.handle('session.prompt', { sessionId: created.sessionId, mode: 'queue', content: [{ type: 'text', text: '干活' }] });
+  const settled = await waitIdle(host.rpc, created.sessionId, { pollMs: 1, startGraceMs: 500, timeoutMs: 5_000 });
+  assert.equal(settled.idle, true);
+  assert.equal(settled.started, true, '必须等到它真的跑起来再等它结束');
+});
+
+test('preview + execute：worker 轮询不应把 session.list 放大成全局扫描', async () => {
+  const host = createFakeHost({ replyAfterPolls: 30 });
+  const preview = await previewMigration(host.rpc, {
+    sessionId: host.sourceSessionId,
+    pollMs: 1,
+    workerTimeoutMs: 5_000,
+  });
+  await executeMigration(host.rpc, {
+    sessionId: host.sourceSessionId,
+    sourceSession: preview.sourceSession,
+    to: 'code',
+    summary: preview.summary,
+    lang: preview.lang,
+  });
+
+  const listCalls = host.state.calls.filter((call) => call.method === 'session.list');
+  assert.equal(listCalls.length, 1, '一次迁移只需读取一次源会话列表，worker 状态必须按会话查询');
+});
+
+test('档位推断不写死 provider/model', async () => {
+  const host = createFakeHost();
+  const pro = await resolveWorkerModel(host.rpc, host.sourceSessionId, 'pro');
+  assert.equal(pro.model, 'deepseek-v4-pro');
+  const flash = await resolveWorkerModel(host.rpc, host.sourceSessionId, 'flash');
+  assert.equal(flash.model, 'deepseek-v4-flash');
+  const follow = await resolveWorkerModel(host.rpc, host.sourceSessionId, 'current');
+  assert.equal(follow.model, 'deepseek-v4');
+  const forced = await resolveWorkerModel(host.rpc, host.sourceSessionId, 'pro', { provider: 'x', model: 'y' });
+  assert.deepEqual([forced.provider, forced.model, forced.reason], ['x', 'y', 'configured']);
+});
+
+test('默认档位跟随源会话：不传 tier 时压缩工人用源会话当前模型', async () => {
+  const host = createFakeHost();
+  await previewMigration(host.rpc, { sessionId: host.sourceSessionId, ...fast });
+  const workerSelect = host.state.calls.find(
+    (call) => call.method === 'session.selectModel' && call.payload.sessionId !== host.sourceSessionId,
+  );
+  assert.equal(workerSelect?.payload.model, 'deepseek-v4', '默认不应再切到 pro 模型');
+});
+
+test('目录里没有对应档位的模型时退回会话当前模型', async () => {
+  const host = createFakeHost({
+    models: {
+      current: { provider: 'acme', model: 'acme-1' },
+      groups: [{ id: 'acme', models: [{ id: 'acme-1' }] }],
+    },
+  });
+  const route = await resolveWorkerModel(host.rpc, host.sourceSessionId, 'pro');
+  assert.deepEqual([route.provider, route.model, route.reason], ['acme', 'acme-1', 'fallback-current']);
+});
+
+test('preset 列表过滤掉 broken 的', async () => {
+  const host = createFakeHost();
+  const presets = await listPresets(host.rpc);
+  assert.ok(!presets.some((p) => p.id === 'broken-one'));
+  assert.equal(await resolveWorkerPreset(host.rpc), 'minimal');
+});
+
+test('能找到会话所属工作区', async () => {
+  const host = createFakeHost();
+  assert.equal(await findWorkspaceId(host.rpc, host.sourceSessionId), 'ws-1');
+  assert.equal(await findWorkspaceId(host.rpc, 'unknown'), undefined);
+});

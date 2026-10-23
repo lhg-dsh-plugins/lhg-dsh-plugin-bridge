@@ -1,0 +1,407 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  createDshAlphaHost,
+  probeDshAlphaHost,
+  resolveDshHost,
+} from '../src/dsh-alpha-host.ts';
+import { executeMigration, foldedHistory, previewMigration, waitIdle } from '../src/migrate.ts';
+
+function fixture() {
+  const calls = [];
+  const agent = { id: 's-source' };
+  const services = {
+    sessionController: {
+      list: async () => ({
+        items: [{
+          sessionId: 's-source',
+          running: false,
+          blank: false,
+          cwd: '/work/project',
+          projections: {
+            asOfSeq: 4,
+            values: {
+              agentPreset: 'minimal',
+              modelSelection: {
+                lastUsed: { provider: 'deepseek', model: 'v4' },
+                next: { provider: 'deepseek', model: 'v4-pro', reasoningEffort: 'high' },
+              },
+            },
+          },
+        }],
+      }),
+      create: async (request) => {
+        calls.push(['create', request]);
+        return { sessionId: 's-target', agentPreset: request.agentPreset };
+      },
+      inspect: async () => ({
+        meta: { id: 's-source', cwd: '/work/project', agentPreset: 'minimal' },
+        events: [
+          { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'hello' }] } },
+          { type: 'assistant/message', seq: 1, time: 2, data: { message: { content: [{ type: 'text', text: 'world' }] } } },
+        ],
+      }),
+      modelCatalog: async () => ({
+        default: { provider: 'deepseek', model: 'v4' },
+        groups: [{ id: 'deepseek', models: [{ id: 'v4' }, { id: 'v4-pro' }] }],
+        failures: [],
+      }),
+      selectModel: async (request) => { calls.push(['selectModel', request]); return { selected: request }; },
+      prompt: async (request) => { calls.push(['prompt', request]); return { accepted: true }; },
+      cancel: (request) => { calls.push(['cancel', request]); return { accepted: true }; },
+      rename: async (request) => { calls.push(['rename', request]); return { title: request.title, seq: 5 }; },
+      attachment: async (request) => ({ attachment: { attachmentId: request.attachmentId }, data: 'AA==' }),
+      resolveAgent: async (sessionId) => {
+        calls.push(['resolveAgent', sessionId]);
+        return { agent };
+      },
+    },
+    workspaceRegistry: {
+      list: () => [{ id: 'ws-1', sessionIds: ['s-source'], path: '/work/project' }],
+    },
+    workspaceController: {
+      archiveSession: async (request) => { calls.push(['archiveSession', request]); return { archivedSessionIds: [request.sessionId] }; },
+    },
+    agentPresets: {
+      remoteExportList: async () => ({
+        presets: [{ id: 'standard', isDefault: true }, { id: 'ptc' }, { id: 'minimal' }],
+      }),
+    },
+    goals: {
+      remoteExportCreate: (resolved, request) => {
+        calls.push(['goal.create', resolved, request]);
+        return { ref: { id: 'g-1', revision: 1 } };
+      },
+      pause: (resolved, ref) => { calls.push(['goal.pause', resolved, ref]); return { ...ref, revision: 2 }; },
+      clear: (resolved, ref) => { calls.push(['goal.clear', resolved, ref]); return { ...ref, revision: 2 }; },
+    },
+  };
+  return { services, calls, agent };
+}
+
+test('alpha adapter exposes the complete BridgeHost contract without apiProxy', async () => {
+  const { services, calls, agent } = fixture();
+  const host = createDshAlphaHost(services);
+
+  assert.equal(host.descriptor.id, 'dsh-typed-controllers');
+  assert.equal(probeDshAlphaHost(services).every((row) => row.available), true);
+
+  const listed = await host.sessions.list();
+  assert.equal(listed.items[0].agentPreset, 'minimal');
+  const models = await host.sessions.models({ sessionId: 's-source' });
+  assert.deepEqual(models.current, { provider: 'deepseek', model: 'v4-pro', reasoningEffort: 'high' });
+  assert.equal(models.groups[0].models[1].id, 'v4-pro');
+
+  const history = await host.sessions.history({ sessionId: 's-source', maxMessages: 10 });
+  assert.deepEqual(history.events.map((entry) => entry.event.type), ['user/message', 'assistant/message']);
+
+  await host.sessions.prompt({ sessionId: 's-target', mode: 'queue', content: [{ type: 'text', text: 'go' }] });
+  const prompt = calls.find(([name]) => name === 'prompt')[1];
+  assert.match(prompt.requestId, /^bridge-/);
+  assert.equal(prompt.sessionId, 's-target');
+
+  assert.deepEqual(await host.workspaces.list(), {
+    items: [{ workspaceId: 'ws-1', sessionIds: ['s-source'] }],
+  });
+  await host.goals.create({ sessionId: 's-source', objective: 'handoff', maxGoalRounds: 1 });
+  assert.deepEqual(calls.find(([name]) => name === 'goal.create').slice(1), [agent, { objective: 'handoff', maxGoalRounds: 1 }]);
+});
+
+function withWorkingDirectory(services, workingDirectory) {
+  const list = services.sessionController.list;
+  services.sessionController.list = async (...args) => {
+    const value = await list(...args);
+    value.items[0].projections.values.workingDirectory = workingDirectory;
+    return value;
+  };
+}
+
+test('alpha.2 adapter keeps original cwd and exposes the working-directory projection semantically', async () => {
+  const { services } = fixture();
+  withWorkingDirectory(services, '/work/project/.worktrees/next');
+  const row = (await createDshAlphaHost(services).sessions.list()).items[0];
+  assert.equal(row.cwd, '/work/project', 'the header remains the original project');
+  assert.equal(row.currentCwd, '/work/project/.worktrees/next');
+});
+
+test('alpha.2 adapter distinguishes a null current directory from the legacy absent projection', async () => {
+  const { services } = fixture();
+  const old = (await createDshAlphaHost(services).sessions.list()).items[0];
+  assert.equal(Object.hasOwn(old, 'currentCwd'), false);
+  withWorkingDirectory(services, null);
+  const current = (await createDshAlphaHost(services).sessions.list()).items[0];
+  assert.equal(Object.hasOwn(current, 'currentCwd'), true);
+  assert.equal(current.currentCwd, null);
+});
+
+test('alpha.2 migration forwards changed cwd alone instead of the original workspaceId', async () => {
+  const { services, calls } = fixture();
+  withWorkingDirectory(services, '/work/project/.worktrees/next');
+  await executeMigration(createDshAlphaHost(services), {
+    sessionId: 's-source', to: 'ptc', summary: '## Goal\nContinue in the worktree', lang: 'en',
+  });
+  assert.deepEqual(calls.find(([name]) => name === 'create')[1], {
+    cwd: '/work/project/.worktrees/next', agentPreset: 'ptc',
+  });
+  assert.equal(calls.some(([name]) => name === 'goal.pause'), true);
+});
+
+test('alpha.3 migration creates a fresh target and uses the controller-returned identity throughout', async () => {
+  const { services, calls } = fixture();
+  services.sessionController.create = async request => {
+    calls.push(['create', request]);
+    return { sessionId: 's-alpha3-created', agentPreset: request.agentPreset };
+  };
+  const result = await executeMigration(createDshAlphaHost(services), {
+    sessionId: 's-source', to: 'ptc', summary: 'Continue in the target', title: 'Alpha.3 handoff',
+  });
+  assert.equal(Object.hasOwn(calls.find(([name]) => name === 'create')[1], 'sessionId'), false,
+    'Bridge must request a new conversation rather than reuse a potentially populated session');
+  assert.equal(result.sessionId, 's-alpha3-created');
+  for (const name of ['selectModel', 'rename', 'prompt']) {
+    assert.equal(calls.find(([method]) => method === name)[1].sessionId, 's-alpha3-created', name);
+  }
+  assert.equal(calls.find(([name]) => name === 'resolveAgent')[1], 's-alpha3-created');
+  assert.equal(calls.some(([name]) => name === 'goal.pause'), true);
+});
+
+for (const invalid of [undefined, 7, {}, [], '', ' ', 'relative/project', '/work/\0project']) {
+  test(`alpha.2 adapter rejects malformed selected-source directory ${JSON.stringify(invalid)} before create`, async () => {
+    const { services, calls } = fixture();
+    withWorkingDirectory(services, invalid);
+    await assert.rejects(executeMigration(createDshAlphaHost(services), {
+      sessionId: 's-source', to: 'ptc', summary: 'Continue',
+    }), error => error.code === 'invalid-current-cwd');
+    assert.equal(calls.some(([name]) => name === 'create'), false);
+  });
+}
+
+test('alpha.2 malformed unrelated rows do not block a source with a valid directory', async () => {
+  const { services, calls } = fixture();
+  withWorkingDirectory(services, '/work/project/.worktrees/next');
+  const list = services.sessionController.list;
+  services.sessionController.list = async (...args) => {
+    const result = await list(...args);
+    result.items.push({ sessionId: 'unrelated', cwd: '/work/unrelated', projections: { values: { workingDirectory: {} } } });
+    return result;
+  };
+  await executeMigration(createDshAlphaHost(services), { sessionId: 's-source', to: 'ptc', summary: 'Continue' });
+  assert.equal(calls.find(([name]) => name === 'create')[1].cwd, '/work/project/.worktrees/next');
+});
+
+test('host resolver keeps rc.2 apiProxy as the first choice and falls back to alpha controllers', () => {
+  const { services } = fixture();
+  const alpha = resolveDshHost(services);
+  assert.equal(alpha.descriptor.id, 'dsh-typed-controllers');
+
+  const apiProxy = { sessions: {}, workspace: {}, goals: {}, agentPresets: {} };
+  const legacy = resolveDshHost({ ...services, apiProxy });
+  assert.equal(legacy.descriptor.id, 'dsh-api-proxy');
+});
+
+test('alpha probe fails closed when one required controller is missing', () => {
+  const { services } = fixture();
+  delete services.sessionController.prompt;
+  const report = probeDshAlphaHost(services);
+  assert.equal(report.find((row) => row.method === 'session.prompt').available, false);
+});
+
+test('optional service discovery never touches Cordis properties without inject', () => {
+  const { services } = fixture();
+  const cordis = new Proxy({
+    get: (name) => services[name],
+  }, {
+    get(target, key) {
+      if (key === 'get') return target.get;
+      throw new Error(`cannot get property "${String(key)}" without inject`);
+    },
+  });
+
+  assert.equal(resolveDshHost(cordis).descriptor.id, 'dsh-typed-controllers');
+  assert.equal(probeDshAlphaHost(cordis).every((row) => row.available), true);
+});
+
+test('a long alpha history is inspected once and preserves the same bounded message window', async () => {
+  const { services } = fixture();
+  const events = Array.from({ length: 240 }, (_, seq) => ({
+    type: seq % 2 === 0 ? 'user/message' : 'assistant/message', seq, time: seq + 1,
+    data: { content: [{ type: 'text', text: `fact-${seq}` }] },
+  }));
+  let inspections = 0;
+  services.sessionController.inspect = async () => {
+    inspections++;
+    return { meta: {}, events };
+  };
+  const host = createDshAlphaHost(services);
+  const messages = await foldedHistory(host, 's-source', { pageMessages: 20, maxPages: 6 });
+  assert.equal(inspections, 1, 'pagination must not repeatedly materialize the whole history');
+  assert.deepEqual(messages.map(message => message.content), events.slice(-120).map(event => event.data.content[0].text));
+
+  events.push({ type: 'user/message', seq: 240, time: 241, data: { content: [{ type: 'text', text: 'new fact' }] } });
+  const next = await foldedHistory(host, 's-source', { pageMessages: 20, maxPages: 6 });
+  assert.equal(inspections, 2, 'a new read must observe a new snapshot, not a TTL cache');
+  assert.equal(next.at(-1).content, 'new fact');
+});
+
+test('alpha worker polling still observes newly appended turn events after a snapshot read', async () => {
+  const { services } = fixture();
+  let inspections = 0;
+  services.sessionController.inspect = async () => ({ meta: {}, events: ++inspections < 3
+    ? [{ type: 'turn/start', seq: 2, time: 1, data: {} }]
+    : [{ type: 'turn/start', seq: 2, time: 1, data: {} }, { type: 'turn/end', seq: 3, time: 2, data: {} }],
+  });
+  const host = createDshAlphaHost(services);
+  await foldedHistory(host, 's-source');
+  assert.deepEqual(await waitIdle(host, 's-source', { afterSeq: 1, pollMs: 1, timeoutMs: 1000 }), { idle: true, started: true });
+  assert.equal(inspections, 3);
+});
+
+/** The observed alpha.2 sequence: two injected user messages follow turn/start,
+ * so a two-message tail loses the lifecycle prefix while a request is active. */
+function contextInjectedTurn() {
+  const types = ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection',
+    'agent/inbox/spliced', 'turn/start', 'agent/inbox/spliced', 'step/start',
+    'system/message', 'user/message', 'user/message', 'request/header', 'request/context'];
+  return types.map((type, seq) => ({ type, seq, time: seq + 1,
+    data: type === 'user/message' ? { content: [{ type: 'text', text: 'synthetic context' }] } : {},
+  }));
+}
+
+test('alpha.2 context injection cannot turn an already-started worker into worker-not-started', async () => {
+  const { services } = fixture();
+  const prefix = contextInjectedTurn();
+  let inspections = 0;
+  services.sessionController.inspect = async () => ({ meta: {}, events: ++inspections < 4 ? prefix : [
+    ...prefix,
+    { type: 'assistant/message', seq: 13, time: 14, data: { message: { content: [{ type: 'text', text: 'done' }] } } },
+    { type: 'turn/end', seq: 14, time: 15, data: { reason: { kind: 'completed' } } },
+  ] });
+  const host = createDshAlphaHost(services);
+  const tail = await host.sessions.history({ sessionId: 's-target', maxMessages: 2 });
+  assert.equal(tail.events.some(({ event }) => event.type === 'turn/start'), false, 'fixture reproduces actual truncation');
+  inspections = 0;
+  assert.deepEqual(await waitIdle(host, 's-target', { afterSeq: 3, pollMs: 1, startGraceMs: 0, timeoutMs: 1000 }), {
+    idle: true, started: true, end: { kind: 'completed' },
+  });
+  assert.equal(inspections, 4, 'do not cancel the active worker at the startup grace bound');
+});
+
+test('alpha.2 a request still in progress at the overall timeout is started, not never-started', async () => {
+  const { services } = fixture();
+  services.sessionController.inspect = async () => ({ meta: {}, events: contextInjectedTurn() });
+  assert.deepEqual(await waitIdle(createDshAlphaHost(services), 's-target', {
+    afterSeq: 3, pollMs: 1, startGraceMs: 0, timeoutMs: 10,
+  }), { idle: false, started: true });
+});
+
+test('alpha.2 queued user text and stale request evidence do not falsely prove startup', async () => {
+  const { services } = fixture();
+  services.sessionController.inspect = async () => ({ meta: {}, events: [
+    { type: 'request/header', seq: 1, time: 1, data: {} },
+    { type: 'request/context', seq: 2, time: 2, data: {} },
+    { type: 'user/message', seq: 4, time: 4, data: { content: [{ type: 'text', text: 'queued request' }] } },
+    { type: 'request/header', seq: 5, time: 5, data: { reason: 'change' } },
+  ] });
+  assert.deepEqual(await waitIdle(createDshAlphaHost(services), 's-target', {
+    afterSeq: 3, pollMs: 1, startGraceMs: 0, timeoutMs: 1000,
+  }), { idle: true, started: false });
+});
+
+test('alpha.2 delayed provider error after cropped turn/start remains worker-failed, never a usable partial handoff', async () => {
+  const { services } = fixture();
+  const originalInspect = services.sessionController.inspect;
+  let prompted = false, inspections = 0;
+  const prefix = contextInjectedTurn();
+  services.sessionController.prompt = async () => { prompted = true; return { accepted: true }; };
+  services.sessionController.inspect = async (id, signal) => {
+    if (id === 's-source') return originalInspect(id, signal);
+    if (!prompted) return { meta: {}, events: prefix.slice(0, 4) };
+    const events = ++inspections < 12 ? prefix : [
+      ...prefix,
+      { type: 'assistant/message', seq: 13, time: 14, data: { message: { content: [{ type: 'text', text: 'partial handoff' }] } } },
+      { type: 'turn/end', seq: 14, time: 15, data: { reason: { kind: 'error', error: { code: 'MISSING_CREDENTIAL', message: 'no credential' } } } },
+    ];
+    return { meta: {}, events };
+  };
+  await assert.rejects(previewMigration(createDshAlphaHost(services), {
+    sessionId: 's-source', pollMs: 1, workerTimeoutMs: 1000,
+  }), error => error.code === 'worker-failed' && error.details.turnEnd.code === 'MISSING_CREDENTIAL');
+});
+
+test('single-read and legacy paged histories agree with interleaved tool and compaction events', async () => {
+  const { services } = fixture();
+  const events = [];
+  const append = (type, data) => events.push({ type, seq: events.length, time: events.length + 1, data });
+  for (let i = 0; i < 40; i++) {
+    append('turn/start', {});
+    append('user/message', { content: [{ type: 'text', text: i === 28 ? '<compacted-summary>current port 7813</compacted-summary>' : `question-${i}` }] });
+    append('tool/call', { tool: 'read', callId: `c${i}`, input: { path: `src/${i}.ts` } });
+    append('tool/result', { callId: `c${i}`, output: `result-${i}` });
+    append('assistant/message', { message: { content: [{ type: 'text', text: `answer-${i}` }] } });
+    append('turn/end', {});
+  }
+  services.sessionController.inspect = async () => ({ meta: {}, events });
+  const host = createDshAlphaHost(services);
+  const { historyWindow: unused, ...sessions } = host.sessions;
+  const legacy = { ...host, sessions };
+  for (const pageMessages of [1, 3, 20, 60]) {
+    assert.deepEqual(
+      await foldedHistory(host, 's-source', { pageMessages, maxPages: 3 }),
+      await foldedHistory(legacy, 's-source', { pageMessages, maxPages: 3 }),
+    );
+  }
+});
+
+test('snapshot failures and cancellation propagate without returning stale or empty history', async () => {
+  const { services } = fixture();
+  const abort = new AbortController();
+  services.sessionController.inspect = async (_id, signal) => {
+    assert.equal(signal, abort.signal);
+    signal.throwIfAborted();
+    throw new Error('history read failed');
+  };
+  const host = createDshAlphaHost(services, abort.signal);
+  await assert.rejects(foldedHistory(host, 's-source'), /history read failed/);
+  abort.abort(new Error('cancelled read'));
+  await assert.rejects(foldedHistory(host, 's-source'), /cancelled read/);
+});
+
+test('V3 snapshots keep system/message nodes out of the bounded message budget', async () => {
+  // DSH 0.1.5 session format V3: the system prompt is surface node 0 and later
+  // in-history updates replace it positionally. Neither may consume the
+  // user/assistant budget or reach the fold.
+  const { services } = fixture();
+  const events = [];
+  const append = (type, data, extra = {}) => events.push({ type, seq: events.length, time: events.length + 1, data, ...extra });
+  append('request/header', { turn: 0, step: 0, header: { config: {} } });
+  append('system/message', { turn: 0, step: 0, message: { role: 'system', content: 'system prompt v1' } }, { surfaceOp: 'append' });
+  for (let i = 0; i < 30; i++) {
+    append('turn/start', {});
+    if (i % 10 === 5) {
+      append('system/message', { turn: i, step: 0, message: { role: 'system', content: `system prompt v${i}` } }, {
+        surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 }, sourceEventSeqs: [1],
+      });
+    }
+    append('user/message', { content: [{ type: 'text', text: `question-${i}` }] }, { surfaceOp: 'append' });
+    append('assistant/message', { message: { content: [{ type: 'text', text: `answer-${i}` }] } }, { surfaceOp: 'append' });
+    append('turn/end', {});
+  }
+  services.sessionController.inspect = async () => ({ meta: { format: 3 }, events });
+  const host = createDshAlphaHost(services);
+
+  const window = await host.sessions.historyWindow({ sessionId: 's-source', maxMessages: 10 });
+  const counted = window.events.map(({ event }) => event.type).filter(type => type === 'user/message' || type === 'assistant/message');
+  assert.equal(counted.length, 10, 'the budget counts user/assistant messages only');
+  assert.equal(window.hasMore, true);
+
+  const folded = await foldedHistory(host, 's-source', { pageMessages: 10, maxPages: 2 });
+  assert.deepEqual(
+    folded.map(message => message.content),
+    Array.from({ length: 10 }, (_, k) => 20 + k).flatMap(i => [`question-${i}`, `answer-${i}`]),
+  );
+  assert.doesNotMatch(JSON.stringify(folded), /system prompt/u);
+
+  const { historyWindow: unused, ...sessions } = host.sessions;
+  assert.deepEqual(folded, await foldedHistory({ ...host, sessions }, 's-source', { pageMessages: 10, maxPages: 2 }));
+});

@@ -1,0 +1,428 @@
+# Changelog
+
+本文件记录对使用者可见的变化。版本遵循语义化版本。
+
+## 0.4.6 — 2026-10-16
+
+- Add exact DSH `0.2.1-alpha.4` to `engines.dsh` and the bounded Workshop `dshVersions` list, retaining all older declarations. Alpha.4's installer refuses 0.4.5's narrower engine; no compatibility exemption is added.
+- Pin all eight development SDKs to the published alpha.4 packages and check the frozen lockfile and actual installed manifests. Cordis, Schemastery runtime dependencies, Host-supplied peers, business source and generated `lib/` are unchanged.
+- Document the alpha.4 running-manager remove-before-install path separately from CLI replacement, retaining memory-only preview, Text fallback, Desktop and hot-replacement boundaries. See the [acceptance record](docs/compatibility/dsh-0.2.1-alpha.4-2026-10-16.md) for local checks and separate release/publication gates.
+- Record real alpha.4 migration, editing, current-directory placement, paused-goal, style isolation and bounded restart checks. Natural same-graph DSH removal calls reproduce pnpm 11.22.0's known late-worker shutdown defect; upstream #13226-only, #14141-only and unmodified 11.26.0 controls isolate the mechanism and complete removal. Preserve the original failed operation as **not a PASS** and do not claim its exact original PID task was recovered. Recommend checking the Host's actual pnpm 11.26.0 or newer and avoiding overlapping package operations; no pnpm dependency, automatic tool upgrade or Bridge runtime change is introduced. Workshop hot-reload evidence remains unset.
+
+## 0.4.5 — 2026-10-15
+
+- Add exact DSH `0.2.1-alpha.3` support while preserving every earlier host declaration. Pin all eight development SDKs to alpha.3 and Cordis to `4.0.5-alpha.2`; installed manifests and the lockfile are checked by regressions. Host-supplied peers and direct runtime dependencies are unchanged.
+- Keep business source and generated `lib/` byte-identical to the 0.4.4 runtime. Bounded official alpha.3 Host/WebUI acceptance used a locally packed 0.4.4 candidate: current-directory worker/target placement, an exact 2,669-character edited handoff, automatic navigation, paused goal, zero target tool calls, live isolation, same-business-byte reinstallation, restart recovery and final removal. See [the acceptance record and 0.4.5 mapping](docs/compatibility/dsh-0.2.1-alpha.3-2026-10-15.md); this historical run is not a registry-install check of 0.4.5.
+- Preserve the observed Text-mode boundary: a mixed bare-path/bullet model summary was rejected without changes, then the tester explicitly edited Markdown before Text/Markdown round-trip and confirmation. No parser protection was relaxed. Images, real approved-plan execution, native alpha.3 Desktop and different-business-byte hot replacement were not re-certified; the known dangling CLI link/cache residue remains documented.
+- Clarify alpha.3 upgrade paths in both languages: the running plugin manager / Remote API returns `already-installed`; API replacement removes first, while CLI replacement stops the corresponding Host before remove/add and restarts it afterward. Finish or save pending in-memory handoffs before either path. Workshop install/remove evidence points to alpha.3, with conservative activation, permissions and null hot-reload evidence retained.
+
+## 0.4.4 — 2026-10-12
+
+- Tell the user when the preview summary file cannot be saved, including the reason and the next command to run. The preview itself still succeeds. A warning line that mentions `--file` is not parsed as the saved path, and failing to record the file's inode after the bytes are on disk does not count as a failed save.
+- Forward `/bridge` stage updates in the command language. Clients without the native card get those stages in the host log, plus a 15-second elapsed update while the summary worker is still running.
+- Keep the running card's screen-reader announcement polite and stable. Only the stable preparing sentence is in the live region; the elapsed counter and progress bar are hidden from assistive tech. Preview, migrated, and target-picker status regions mount empty and fill after mount, so the first announcement is a change.
+- Follow the command language for argument errors and the missing-session error: `--lang` anywhere in the input (the last valid value wins), otherwise the plugin `lang` setting. `auto` stays Chinese.
+- Show the summary token budget on the preview. That number is the same limit the summary worker is instructed to respect. The rough input-token heuristic is not shown as a cost.
+- Migrate one summary file once per process. Typed `--go`, `--file`, and WebUI confirmation share one synchronous claim, so concurrent confirmations cannot build two targets. `--file` claims the preview that owns that file even for a different preset. After one preview of a target is confirmed, a bare `--go` does not migrate an older preview of that target; an explicit preview card still can.
+- A placement failure, or any other error before the target session exists, puts the preview back and keeps the file for a retry. When the target was created but the kickoff was not sent, the preview cannot be confirmed again with a different edit or the same file.
+- The plugin deletes a temporary summary only when this process wrote that exact file (same inode and unchanged content): after the kickoff is delivered, or when the preview expires or is evicted past the cap of 8 and no other call is reading it. User files, files the user edited, files recreated at the same path, and files from a separate CLI `preview` process are left in place.
+- Before migrating, Bridge leaves a small record for that summary in a per-user directory under the system temp directory (`dsh-bridge-claims-<uid>`). Another process gets a clear error while that handoff runs, after it was delivered, or after the target was created without the kickoff (30 minutes). CLI `migrate` keeps the record when the kickoff was not delivered, so rerunning it does not create a second target. A record left by an exited process on the same machine can be taken over at once; any other record after 10 minutes, by atomic replacement. Taking over a handoff that never finished (for example one interrupted with Ctrl-C) adds a warning to check for a second target session, and the warning repeats until a handoff of that file is delivered or kept. Two processes taking over the same stale record at the same moment is not prevented; the one whose record was replaced adds a warning to check for a second target session.
+- CI: the required `build` check fails when the Node 22/24 matrix or the macOS/Windows summary-file jobs fail or are cancelled.
+
+## 0.4.3 — 2026-10-11
+
+- Build and typecheck against the published DSH `0.2.1-alpha.2` SDK and its Cordis `4.0.5-alpha.1`, replacing the stale `0.1.6-alpha.2` development baseline. Keep the existing host support range and host-supplied SDK peers.
+- Check installed SDK versions as well as manifest pins. Exercise the built client against the official slot registry through owner collapse, remount and plugin unload. See [validation](docs/compatibility/sdk-baseline-2026-10-11.md).
+
+## 0.4.2 — 2026-10-10
+
+- Support the tested DSH `0.2.1-alpha.2`, retaining older declarations and the existing SDK build baseline. The bounded Workshop host list includes alpha.2; no new required capability or direct runtime dependency is added.
+- Read the source's effective working directory immediately before creating a preview worker or migration target, including confirmation and approved-plan retry. A switched directory is passed alone as `cwd`; unchanged/legacy sessions keep workspace placement. Invalid or unavailable explicit current-directory data stops creation instead of silently migrating back to the original project.
+- Recognize fresh durable execution events when a message-aligned history tail crops `turn/start`. Queued text, stale events and configuration-only headers do not prove startup; timeout and provider-error handling stay unchanged.
+- Verify 280 tests, build/typecheck, generated artifacts, datasets and tarball smoke. Real alpha.2 Web checks cover exact edited handoff, current-directory plan execution, paused goals, plugin isolation and removal/restart. rc.2 Desktop and alpha.1 backward smoke are separate bounded checks; the signal-interrupted Desktop cache-restart limitation remains documented. See [acceptance](docs/compatibility/dsh-0.2.1-alpha.2-2026-10-10.md).
+
+## 0.4.1 — 2026-10-04
+
+- Add the tested DSH `0.2.1-alpha.1` to `engines.dsh`, preserving previous supported targets and not pre-approving later alphas or stable 0.2 releases.
+- Record bounded official npm/WebUI acceptance of the unchanged published 0.4.0 runtime: doctor 13/13, rendered text/Markdown edits, exact migration to PTC, paused goals, approved-plan execution in a fresh session, style-preserving live toggles and uninstall/restart.
+- Clarify the host goal service's edge-whitespace normalization; the approved-plan kickoff remains byte-exact. Server/client source, generated `lib/`, dependencies and SDK pins are unchanged.
+
+## 0.4.0 — 2026-10-02
+
+- Add **Approve in new session** to the official WebUI's public `conversation.plan-review.actions` slot. Approval is bound to the exact live native plan document and source session. The original planning turn stops without switching it out of plan mode; a fresh session receives the full approved plan, keeps the source preset/model/workspace, and starts execution.
+- Preserve the host's ordinary in-place approval and feedback controls. No new required host service or DSH peer dependency is introduced; older hosts without the plan-review slot retain ordinary Bridge migration.
+- Deduplicate repeated approval requests, refuse stale or altered documents, and retain a session-bound retry receipt when target creation fails. Source cancellation must succeed before execution is admitted. Complete plan text is not compressed into the normal summary budget; the transfer limit is 128,000 characters.
+- Document the [workflow and boundaries](docs/approved-plan-handoff.md) and [test-driven evidence](.github/tdd/approved-plan-handoff.tdd.md). Candidate acceptance on official DSH 0.2.0-rc.2 used a real model and WebUI approval click, then verified an actual file write and byte-exact read-back in the fresh execution session.
+
+## 0.3.11 — 2026-09-30
+
+- Add the tested DSH `0.2.0-rc.2` to `engines.dsh`, retaining the previous 0.1.x range: `>=0.1.0-rc.7 <0.2.0-0 || 0.2.0-rc.2`. This does not pre-approve other 0.2 prereleases or the stable 0.2.0 release. Runtime code, generated `lib/`, dependencies and SDK baseline are unchanged.
+- Update both READMEs and include the [bounded official-host acceptance record](docs/compatibility/dsh-0.2.0-rc.2-2026-09-30.md): published Bridge 0.3.10 passed doctor 13/13, real preview/edit/confirmation, direct and waiting handoffs, image transfer and text fallback, live toggles, and uninstall/restart on an isolated macOS WebUI. The known dangling CLI link remains; native Desktop login/quit and full optional-component installation are not covered.
+
+## 0.3.10 — 2026-09-23
+
+- Preserve narrowly recognized, still-active user prohibitions on using tools or reading/writing files in the editable handoff when the summary worker omits them. Later explicit permission supersedes the earlier prohibition; the confirmed draft is still sent exactly as edited. This is not a guarantee that every natural-language constraint is preserved.
+- Keep the native preview confirmation control reachable above the official WebUI's fixed composer in tested narrow viewports. Verified the source build on official DSH 0.1.7-alpha.2 with real preview/edit/migration, no target tool calls, a paused goal, and unchanged source history; see the [bounded acceptance report](reports/dsh-0.1.7-alpha.2-compat-2026-09-23.md).
+
+## 0.3.9 — 2026-09-22
+
+- Clarify in both languages that **Continue directly** / `--continue` is the user's current confirmation of the handoff's already-defined next step. It satisfies generic continuation waits, not separate action approvals, tool permissions, safety restrictions, or other unmet prerequisites. The handoff text, default waiting mode, and paused-goal behavior remain unchanged.
+
+## 0.3.8 — 2026-09-22
+
+### Handoff UX
+
+- Preview failure reasons: `waitIdle` returns the host's `turn/end` reason; `previewMigration` throws distinct structured errors (`worker-failed`, `worker-aborted`, `worker-not-started`, `worker-timeout`, `worker-empty`). The command formats localized zh/en error messages naming the concrete next step (e.g., configure API key → rerun).
+- Card continue option: PreviewCard adds a "wait for confirmation" / "continue directly" radio (default: wait). `buildBridgeMigrationCommand` appends `--continue` when the user chooses direct continuation.
+- MessageCard renders message text with preserved newlines (`pre-wrap`) instead of Markdown.
+- Target picker: pending previews keyed by preview ID (bounded newest 8 per session, 30-min TTL); strict parser of `可迁入：`/`Available:` in usage with fallback to plain text; clickable buttons executing `/bridge <id>` via `execute`; `buildBridgePreviewCommand`.
+
+### Peers and engines
+
+- Replace five DSH optional peer ranges with `"*"` and add `engines.dsh: ">=0.1.0-rc.7 <0.2.0-0"`. dshmarket evaluates `engines.dsh` with `includePrerelease: true`, so every current prerelease host matches. Individual peer `||` terms are no longer needed for each new prerelease minor.
+
+## 0.3.7 — 2026-09-18
+
+### DSH 0.1.6-alpha.2
+
+- Open the migration target through the WebUI's `uiWorkspace.openSession` navigation service. DSH 0.1.6-alpha.2 removed `sessions.open`, so the automatic open after **Confirm migration** and the **Open target session** button would have thrown a `TypeError`. Hosts without that service, or whose service throws, still use `sessions.open`; a host with neither shows a localized error instead of failing silently.
+- Read the navigation service at click time with `ctx.get('uiWorkspace')` instead of adding it to the client `inject` list. Every Cordis inject entry is required, so hosts without the service would otherwise leave the client module pending.
+- Keep waiting until the created target appears in the browser's session list before opening it: alpha.2 rejects sessions that are not listed yet. The wait now stops when the client plugin unloads, and its timeout message follows the card language.
+- Build against the exact 0.1.6-alpha.2 client SDK. The peer ranges are unchanged because `^0.1.6-alpha.1` already matches alpha.2.
+- Docs: for unresolved images, recommend the image-capable V4.1-Flash (`deepseek-flash`) instead of `deepseek-v4-flash-vision-exp`, which DSH 0.1.6-alpha.2 dropped from the default model list together with V4 Flash. Note that on alpha.2 a first install from the WebUI Plugins page applies without a restart, while upgrading there or installing with the CLI may still need one.
+- Verify on official npm DSH 0.1.6-alpha.2 and 0.1.6-alpha.1: the published 0.3.6 fails to open the target on alpha.2, and the fix opens it on both hosts, keeps the paused goal, still applies `DSH_BRIDGE_TIER`, and survives live disable and enable ([report](reports/dsh-0.1.6-alpha.2-compat-2026-09-18.md)).
+
+## 0.3.6 — 2026-09-15
+
+### DSH 0.1.6-alpha.1
+
+- Extend the optional DSH peers to `^0.1.6-alpha.1`. `^0.1.5-alpha.1` matches a future 0.1.6 release but no 0.1.6 prerelease. Every older host range is kept.
+- Build against the exact 0.1.6-alpha.1 client SDK. The SDK change is additive, and the generated `lib/` is byte-identical to 0.3.5.
+- Smoke-test the packed candidate on an official npm 0.1.6-alpha.1 web profile: doctor 13/13, native card, `ptc` still listed after the PTC runtime rename, and a keyless preview that fails closed. The model-backed migration was not re-run ([report](reports/dsh-0.1.6-alpha.1-compat-2026-09-15.md)).
+
+## 0.3.5 — 2026-09-10
+
+### DSH 0.1.5-rc.1
+
+- Verified on DSH 0.1.5-rc.1, now DSH's npm `latest`: doctor 13/13, native card, three model-backed migrations to PTC with exact edited handoffs and paused goals, and an unresolved image carried to the image-capable default model ([report](reports/dsh-0.1.5-rc.1-compat-2026-09-10.md)).
+
+### Image kickoff
+
+- Tell the target that unresolved source images are already attached to the kickoff message as images and must be checked visually without calling tools. On DSH 0.1.5-rc.1 a PTC target otherwise spent an extra read-image tool step before restating, roughly doubling that turn's tokens.
+
+### Summary worker model
+
+- Default `modelTier` is now `current`: the summary worker uses the source conversation's model instead of the provider's `pro`-like model. On DSH 0.1.5-rc.1 that is DeepSeek-V41-Flash, which matched V4-Pro on summary facts and on probing migrated `minimal` targets, with no wipeouts, at about half the summary time ([tier comparison](reports/worker-tier-rc1-2026-09-10.md)).
+- DSH releases before 0.1.5-rc.1 have no V4.1-Flash; set `DSH_BRIDGE_TIER=pro` or pass `--tier pro` to keep the previous behavior. `--tier`, `DSH_BRIDGE_TIER` and `workerModel` still override the default.
+
+## 0.3.4 — 2026-09-10
+
+### DSH 0.1.5-alpha.1
+
+- Extend the optional DSH peers to `^0.1.5-alpha.1` (DSH published no 0.1.4, and a caret prerelease range never matches the next prerelease minor), keep every older host range, and build against the exact 0.1.5-alpha.1 client SDK; the generated `lib/` is byte-identical to the 0.3.3 build.
+- Cover DSH session format V3 with fixtures: `system/message` surface nodes and positional replacements never enter the fold or the bounded history budget, and the single-read and paged adapters still agree.
+- Smoke-test the packed tarball on an official npm `0.1.5-alpha.1` web profile: plugin add, served native-card bundle, `/bridge --doctor` 13/13 and preset listing on a V3 session. Model-backed preview, migration and image fallback were not re-run; see [the compatibility report](reports/dsh-0.1.5-alpha.1-compat-2026-09-09.md).
+
+## 0.3.3 — 2026-09-08
+
+### DSH 0.1.3-alpha.2 and bounded history reads
+
+- Extend the optional DSH peers to `^0.1.3-alpha.2`, retain older host ranges, and build against the exact alpha.2 client SDK.
+- Read a bounded source-history window from one fresh typed-controller snapshot instead of materializing the full Session once per page. Legacy RPC adapters retain their paged path; worker polling still reads fresh events without a TTL cache.
+- Avoid copying the complete event prefix during local pagination; locate a backward cursor by binary search.
+- Validate an official npm `0.1.2-rc.1` profile upgraded to `0.1.3-alpha.2`: old log bytes and titles, folded content, native Text/Markdown edits, paused PTC targets, image-to-text fallback, and clean removal after restart.
+- Record the 6,000-message history comparison and real-install boundaries in [the compatibility report](reports/dsh-0.1.3-alpha.2-compat-2026-09-08.md).
+
+## 0.3.2 — 2026-09-03
+
+### Native text editor
+
+- Accept flat ordered Markdown lists such as `1.` and `7)` in the five-section Text editor instead of forcing users back to raw Markdown.
+- Preserve each original list marker and continuation prefix when editing rows; newly added rows continue the final ordinal and delimiter.
+- Keep nested lists, mixed block structures, and other non-lossless Markdown fail-closed in the source editor.
+
+### DSH 0.1.2-alpha.5 compatibility
+
+- Upgrade a titled official alpha.3 profile in place to alpha.5 without losing its v4 projection-cache title.
+- Validate the packed client on the official alpha.5 WebUI: typed controllers 13/13, ordered-list Text/Markdown round trip, edited `ptc` target with paused goal, and automatic target opening.
+- Validate a Web-created `standard` source with an unresolved image falling back visibly on a text-only target, followed by residue-free removal and restart.
+
+## 0.3.1 — 2026-08-31
+
+### DSH 0.1.2-alpha.2 compatibility
+
+- Add the typed-controller alpha path to the published dependency contract and remove the deleted `dsh-client-runtime` peer/import.
+- Consume alpha.2's split Chat, Session Controller, renderer, Session UI, primitive, and slot declarations; provide the newly required localized Markdown/JSON labels.
+- Treat both rc.2 `attachment-error` and alpha.2 `session/attachment-invalid` as deterministic image-admission failures when their reason permits a safe text fallback.
+- Mark Cordis as host-provided so a clean DSH profile passes `pnpm peers check` without hiding its supported version range.
+- Validate the official npm alpha.2 WebUI: doctor 13/13, Preview/Text/Markdown editing, `code` to `ptc`, paused target, auto-open, source preservation, and residue-free removal.
+
+## 0.3.0 — 2026-08-26
+
+### 官方 WebUI 原生迁移卡片
+
+- 同一个包新增可选 `dsh.client` half，在官方 `conversation.chat.commandview` slot 中渲染 `/bridge`。
+- 预览执行期间立即显示经过时间；完成后使用官方 `MarkdownText`，完整 JSON 使用 `JsonTree`。
+- 生成中卡片跟随官方 WebUI 的文档语言；英文界面不再混入中文，中文界面也不再混入英文。
+- 卡片提供「预览 / 文本编辑 / Markdown」三态：普通用户按五段表单编辑，开发者仍可修改完整源码；非标准文档无损回退到 Markdown。
+- 长内容只在卡片正文滚动，工具栏与确认按钮保持可见；窄屏按钮换行，深浅主题均使用官方 `color-scheme`。
+- 用户可以在卡片内编辑摘要；确认时将有界 base64url 载荷交回服务端命令，载荷不写进持久会话日志，首尾字节也不被静默裁剪。
+- WebUI 编辑载荷必须绑定未过期的当前预览；同一载荷重复确认返回第一次目标结果，不会重复创建会话。
+- 无 React 的 `dsh-plugin-bridge/client-contract` 对外提供卡片解析、五段文本投影和确认命令构造，供兼容官方 slot 的第三方 UI 复用。
+- WebUI 确认绑定唯一预览 ID；重复确认、旧卡片重放及 kickoff 送达不明时均返回原目标，不再误建第二个会话。
+- 目标创建后通过官方 Session runtime 自动打开；旧客户端继续使用完整服务端文本、文件编辑与标题/ID 回退。
+- 隔离的官方 DSH `0.1.1-rc.2` 三次真实重复验收中，预览与目标复述均保留 5/5 固定事实；worker 用时 7.4–12.8 秒。
+
+## 0.2.11 — 2026-08-24
+
+这一版修复大量历史会话下的网关扫描放大，不改变摘要、goal、图片或确认语义。
+
+### 性能修复
+
+- 压缩 worker 不再每两秒通过全局 `session.list` 查运行状态；现在记录 prompt 前的事件水位，
+  只轮询该会话的有界 `session.history` 尾页，等待新的 `turn/start` / `turn/end`。
+- `/bridge`、CLI、预览与执行链路复用同一份源会话快照，避免为 preset、标题、cwd 和落点
+  重复扫描全局会话列表。
+- 没有采用 TTL 缓存，因此不会因陈旧的 `running=false` 重新引入“worker 尚未启动就被当作完成”的竞态。
+
+### 验证
+
+- 回归 fixture 中，30 次 worker 轮询的 `session.list` 调用由 32 次降为 1 次；延迟启动测试仍通过。
+- `npm run verify` 126/126 通过，包含 Node 22/24、生成产物同步、数据集与隔离包安装 smoke。
+- 当前分支打包安装到隔离的官方 DSH `0.1.1-rc.2` Web profile 后，
+  `deepseek-v4-flash` 的源会话、Bridge 预览和迁移目标均为 4/4 事实命中，doctor 13/13，
+  worker + target 使用 3,802 nominal tokens，3/3 测试会话已归档。
+
+## 0.2.10 — 2026-08-23
+
+这一版把已有的迁移安全与实测证据收成可发布、可安装、可扫读的产品路径；迁移运行时语义不变。
+
+### 发布与验证
+
+- 新增统一 `npm run verify`：构建、类型检查、125 项 fake-host 测试、生成产物同步、数据集检查，以及真实 npm tarball 的打包、安装和导入 smoke。
+- `prepublishOnly` 复用同一门禁；GitHub Release 发布前校验 tag 与 `package.json` 版本一致。
+- 新增 GitHub OIDC Trusted Publishing 工作流，首次手动 npm 发布并配置 trusted publisher 后，后续 release 不需要长期 npm token。
+- npm 包包含设计说明、关键报告和原始证据，安装命令缩短为 `dsh plugin --profile web add dsh-plugin-bridge`。
+
+### 文档
+
+- 中英 README 首屏改为“使用场景 → 官方 WebUI 证据 → 一行安装”，长篇安全、成本和图片策略下沉到 `docs/design.md`。
+- 增加兼容矩阵与迁移决策表，保留 30/30、60/60、视觉 5/5、token 配对中位数与适用边界。
+- 完成原生 WebUI 迁移卡片可行性验证；确认官方 client module / slot 路径可行，但因 prerelease 版本耦合暂不进入主包。
+
+## 0.2.6 — 2026-08-21
+
+这一版补齐 DSH 0.1.1-rc.2 的真实视觉迁移链，并阻止摘要 worker 静默改变目标模型。
+
+### 修复
+
+- 目标会话会在 goal 与 kickoff 之前显式继承源会话的 provider、model 与 reasoning effort。
+  rc.2 会把摘要 worker 的 `session.selectModel` 保存为 host 默认值；旧实现因此可能把视觉源会话
+  的目标悄悄切成 `deepseek-v4-pro`。复制失败时现在会明确 warning，不再静默换模型。
+- 用户可见的图片搬运提示不再把能力写死为 rc.8；rc.8+ 与 0.1.1-rc.2 共用同一持久附件路径。
+
+### 兼容性与验证
+
+- 在隔离的官方 `@deepseek-ai/dsh@0.1.1-rc.2` profile 上安装并加载插件，`/bridge --doctor`
+  为 13/13；`deepseek-v4-flash-vision-exp` 未解析 PNG 经真实 `/bridge minimal` 预览和
+  `--go --continue` 迁移后，目标保持同一 VLM，首轮事实 5/5，原图发送 1 张。
+- 最终安装命令路径使用 1,770 nominal / 4,714 processed tokens；这是单 fixture 绝对值，
+  不是相对无 Bridge 的因果百分比。详见 `reports/v0.2.6-rc11-vision-report.md`。
+- 新增模型继承回归测试；完整套件 121/121 通过。
+
+## 0.2.5 — 2026-08-21
+
+这一版对齐 rc.8 的图片附件链路，同时保持默认 DeepSeek 文本模型下的低成本、可见降级。
+
+### 新增
+
+- 含图用户消息进入折叠结果时保留 rc.8 持久附件引用；图片-only 消息不再从压缩取材中静默消失。
+- 图片同轮的关联助手正文由程序逐字追加为独立视觉证据，不经过摘要 worker 二次改写。
+- 没有关联助手正文的原图会在迁移时尝试随 kickoff 发送给视觉目标；文本模型在 host
+  准入阶段拒绝后自动退回纯文本交接，不产生一次失败的模型轮次。
+- 逐字视觉证据使用独立 60K 字符预算，按完整块纳入；超限会明确报告，绝不从证据中间截断。
+
+### 兼容性与验证
+
+- `session.attachment` 作为 rc.8 可选 RPC 接入，不进入 rc.6/rc.7 主链路和 doctor 必需方法集合。
+- 新增图片折叠、原文保真、未解析阻断、视觉目标原图搬运与文本目标零模型降级测试；完整套件
+  120/120 通过。
+
+## 0.2.4 — 2026-08-20
+
+这一版阻断迁移摘要中的旧值复活，并用短会话、真实 compaction、三种目标 preset 和
+两种确认模式完成 12 组 release acceptance。
+
+### 修复
+
+- 摘要不再为了说明“已作废”而复述旧端口、旧路径、旧依赖或旧约定，只保留当前生效值。
+- kickoff 增加第二道防线：目标会话只把当前生效值作为可执行事实，不引用旧具体值。
+
+### 验证
+
+- 修复后 6 份独立摘要、12 个目标会话的摘要/复述/首次有效工作事实命中均为 100%，
+  关键事实 100%，预定义旧值复活为 0。
+- confirm 固定为 2 次目标请求，`--continue` 固定为 1 次；24 次 idle soak 与一次 host
+  重启均未产生额外 turn/token。
+- 新增可复现的 rc.8 端到端评测入口与完整 token/归档报告。
+
+## 0.2.3 — 2026-08-20
+
+这一版把“高准确率、低成本迁移”落实到确认轮与 goal driver 的边界上。
+
+### 修复
+
+- `--continue` 不再让 goal 保持 armed。两种确认模式都会先 pause goal；`--continue`
+  只让同一个 kickoff 请求在复述后继续工作，避免 goal driver 再追加一轮模型请求。
+- 只要发送 kickoff，就始终把摘要放进 prompt。高级 `--inject goal` 不再可能因为
+  “goal mutation 不注入上下文 + goal 已暂停”而让首轮看不到摘要。
+- pause 失败仍然 fail closed，不发送 kickoff。
+
+### 文档
+
+- 中英 README 从长篇说明改为“快速安装 → 成本/准确率 → 原理 → 兼容性”，加入短导航，
+  把上游边界、TotoroPilot、CLI 与配置折叠或下沉到文档页。
+- 成本说明区分压缩调用、摘要注入与目标 preset 的完整请求成本；明确默认确认轮与
+  `--continue` 同轮继续之间的成本差异。
+
+## 0.2.2 — 2026-08-20
+
+这一版把“迁移成功”收紧成“迁移后不会在用户看见目标会话之前自行开工”。
+
+### 修复
+
+- 默认迁移会在 `goal.create` 后立即调用 `goal.pause`，再发送只要求复述理解的核对轮；
+  目标会话复述后等待用户确认。只有显式 `--continue` 才保持 goal armed 并继续下一步。
+- pause 失败时 fail closed：取消目标会话的自动启动、不发送 kickoff，并给出可操作警告。
+- 成功结果打印目标会话标题与 session ID，缓解官方 WebUI 无法由插件自动导航的问题。
+
+### 文档与验证
+
+- 中英 README 使用现有 social cover 作为项目 hero，并链接 Awesome DeepSeek Harness 收录。
+- 补充官方 Agent Preset 工厂与 Bridge 的边界：前者造 preset，后者迁移已有会话状态。
+- 记录 2026-08-20 的官方 rc.8 隔离安装、WebUI 迁移与重启持久化实测。
+
+## 0.2.1 — 2026-08-20
+
+对齐 dsh 0.1.0-rc.8，并给上游接口变动加一道护栏。
+
+### 兼容性
+
+- 对着 rc.8 逐条核对了本插件用到的每一个上游面：`ctx.commands.register` 的注册契约、
+  `ctx.apiProxy` 的服务键与成员、十二个 RPC 方法的签名、goal 服务、compaction 检查点
+  标记、preset 组装、`dsh plugin add` 的装载机制。**没有一处发生变化**，rc.6 / rc.7 /
+  rc.8 上行为一致。
+- rc.8 给命令注册表加了图片附件：`CommandInvocation` 多了 `attachments` 字段，
+  `CommandInputDescriptor` 多了可选的 `images`。这是增量改动。`/bridge` 不声明
+  `input.images`，所以带图片的调用会被注册表在进入处理器之前挡下并给出明确错误——
+  这正是我们想要的行为，不需要改代码。类型里把 `attachments` 显式声明了出来。
+
+### 新增
+
+- **`/bridge --doctor`**：报出这套 host 实际暴露了十二个网关方法里的哪几个、
+  当前模式、可迁入模式、生效配置。上游哪天挪了东西，它会点名说缺了什么，
+  而不是让用户遇到一个含糊的失败。
+- **`test/upstream-contract.test.mjs`**：把依赖的上游面钉成测试——方法名集合是冻结的，
+  命令定义形状按上游 `normalizeDefinition` 的要求断言，并验证处理器容忍上游后加的字段
+  （rc.8 的 `attachments` 就是这么加进来的）。dsh 是 developer preview，
+  这道护栏让 CI 先发现问题，而不是用户先发现。
+
+### 文档
+
+- README（中英）新增一节「那 rc.8 的 `@` 引用会话呢？」。rc.8 的 web bundle 默认挂上了
+  `dsh-session-reference` 与 `@` 输入触发，读者会问这个问题：`@` 是把另一个会话历史的
+  有界只读快照**加**到当前会话上，bridge 是把会话压缩成固定 schema **搬**到目标 preset
+  的新会话去。而且被引用的历史是旧 preset 下产生的（含工具调用），正是跨 preset 交接
+  最想丢掉的部分。
+
+### 移除
+
+- `@deepseek-ai/dsh-skill` 依赖（peer + dev）。0.2.0 删掉技能之后就没有任何代码
+  import 它了，留着只会在安装时产生无意义的 peer 噪音。
+
+## 0.2.0 — 2026-08-18
+
+这一版的主题是：**让它成为一个正常的 dsh 插件**——`dsh plugin add` 装上、重启，
+输入框里就有 `/bridge`；`dsh plugin remove` 卸掉，命令随 fiber 一起消失。
+
+0.1 交付的是一份 `SKILL.md`，指望模型读到它、然后自己去编排一串 RPC。这既不可靠，
+也不是 dsh 插件的形态：上游 30 个包用 `ctx.tools.register` 暴露能力、7 个包用
+`ctx.commands.register` 注册 slash 命令，**用 `ctx.skills.register` 的包是 0 个**——
+skill 在 dsh 里是给用户和项目写东西的创作面，不是插件的调用面。
+
+### 新增
+
+- **`/bridge` 命令**（形状对齐上游 `dsh-plan-mode` 的 `/plan`）：
+  - `/bridge` 列出可迁入的模式，`/bridge <preset>` 出摘要给你过目，`/bridge <preset> --go` 执行；
+  - 由 UI 直接派发给命令注册表，**全程不经过模型**，输出也不进对话历史；
+  - 因此不需要 bash、不需要环境变量、不依赖模型主动配合，`minimal` 这种没有 skill
+    工具的 preset 也能发起迁移。
+- **进程内执行**：`@deepseek-ai/dsh-host-apiproxy` 把整套网关作为 `ctx.apiProxy` 提供，
+  插件直接调服务完成迁移——不出进程、不用端口、不读 `DSH_WEB_URL`。
+- **对模型提示词零贡献**：不注册技能、也不注册工具。不迁移就是零 token 开销，
+  也不会让任何会话的 KV 缓存失效。（面向模型的工具是故意不做的：迁移是人的决定。）
+- **预览与执行分离**：`/bridge <preset>` 不改动任何会话，把摘要打印出来并落盘；
+  改完那个文件再 `--go --file <path>`。摘要文件是唯一事实源。
+- **`dsh-bridge` CLI** 作为手动 / 脚本路径保留（走回环 HTTP），评测 harness 复用同一套编排。
+- **对着假 host 的端到端测试**：`/bridge` 命令、`ctx.apiProxy` 适配器、迁移全链路、
+  CLI 进程都在 CI 里跑完整流程，不需要真的 dsh host，也不烧 token
+  （`test/fake-host.mjs`）。测试从 27 条增至 95 条。
+- 评测新增 **`guess` 猜测基线臂**（`BRIDGE_ARM=guess`）：不埋点直接问探针，
+  测出打分口径的下限。所有命中率都应减去它再读。
+- 子路径导出（`dsh-plugin-bridge/compression`、`/fold`、`/migrate`、`/command`、`/rpc`）。
+
+### 移除
+
+- `skills/bridge/SKILL.md` 与 `ctx.skills.register` 调用。理由见上；
+  `ctx.tools.register` 也没有加，见「新增」里那条。
+
+### 修复
+
+- **取材预算超限时砍错了地方。** 旧实现按顺序装、装不下就从当前分区头部切一刀然后
+  中断，于是活下来的是**最老**的用户消息，而承载「刚完成什么 / 卡在哪」的最近助手
+  结论段会整段消失；`userMessagesUsed` 还恒等于总条数，调用方看不出发生过丢弃。
+  现在按分区配额分配、未用尽的额度按优先级回流、超限时从最老的开始丢，
+  并新增 `dropped` 字段把裁剪如实报出来。
+- **配置项此前完全没有消费者。** `apply()` 从不读 config，`SUMMARY_CHAR_BUDGET`
+  导出后零引用，而 `docs/guide.zh.md` 把它们连同 `DSH_BRIDGE_*` 环境变量当功能写进了
+  文档——设了不报错也不生效。现在每个键都真的进入命令的行为。
+- **迁移会让新会话进入最多 256 轮的自主循环。** 上游 `goal.create` 的部署默认
+  `maxGoalRounds` 是 256，`dsh-goal-round-driver` 会在 agent 空闲时把目标渲染成
+  `<goal_round>` 提示反复跑。现在默认只给 1 轮，跑完交回用户（`goalRounds` 可配）。
+- **摘要不一定进得了上下文。** 上游 `dsh-goal` 明确「Goal mutations do not inject
+  model context」——摘要能被模型看见依赖 goal-round-driver 或模型主动调 `get_goal`。
+  默认注入方式改为 `both`：挂 goal 的同时，首轮提示里也带摘要全文，任何组装下都成立；
+  没挂 goal 服务的部署会降级而不是失败。
+- **skill 的 description 曾经有两份，生效的是没有路由触发词的那份**（frontmatter 里带
+  "Use when …" 的版本被 `apply()` 整块剥掉了）。随技能一起移除，问题不复存在。
+- **compaction 底稿带着上游的面向模型指令一起被喂给压缩工人。** 上游检查点的正文是
+  `CHECKPOINT_PREAMBLE + <compacted-summary>…</compacted-summary>`，旧实现只去标签，
+  于是「别提这个 checkpoint，直接继续」也进了取材。现在只取标签之间的内容。
+- **压缩模型写死了 deepseek 的 provider/model id。** 现在读 `session.models` 的目录，
+  按档位在同一 provider 里挑，挑不到就退回会话当前模型；也可用
+  `workerProvider`/`workerModel` 直接指定。
+- **`waitIdle` 存在竞态。** 旧实现先睡 2 秒再看 `running`，host 排队慢一点就会把
+  「还没开始」误判成「已经跑完」，取到上一轮的回答。现在先等它真的跑起来。
+- `session.list` 改为按 cursor 取完。上游 v1 一次返回全部、`cursor` 只是预留位，
+  所以今天行为不变；这是为了上游真分页之后不会悄悄只看第一页。
+- 环境变量被设成空串（`DSH_API=`）时不再覆盖掉后续的回退顺序。
+
+### 评测
+
+- **每个 run 一个空的临时工作区**（`workspace.create` / `workspace.delete`）。
+  0.1 的所有 run 共用同一个工作区，对照臂的 agent 因此能从磁盘上的 host 会话日志
+  甚至本仓库的 `datasets/*.json` 里把埋点事实翻出来——这正是 bare→code 拿到 9/10 的原因。
+- **run id 改为由配置派生**，加一个题材不再让历史 id 全部重编号。
+- 评测脚本改为直接 import `src/`：跑的就是用户跑的那条代码路径。
+- `eval/fold.ts` 与 `eval/types.ts` 删除（前者是 GUI 折叠器的副本，30+ 条类型错误、
+  零测试覆盖，且 `eval/` 从不进类型检查；后者与 `src/types.ts` 逐字节重复）。
+  折叠器移到 `src/fold.ts`，有了测试，也进了类型检查。
+
+### 工程
+
+- CI 增加 `tsc --noEmit`（覆盖 `src` 与 `eval`）与 Node 22/24 矩阵。
+- 补 `repository` / `bugs` / `homepage` / `bin` / `exports`；补 dependabot 与 issue 模板。
+
+## 0.1.0 — 2026-08-17
+
+首个版本：压缩核心、bridge 技能、评测 harness、26 组准确率实验与 8 条 A/B 对照。
